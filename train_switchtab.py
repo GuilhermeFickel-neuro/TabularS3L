@@ -212,7 +212,9 @@ def main():
     test_ds = SwitchTabDataset(X_test, y_test.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     
     # Create dataloaders
-    train_dl = TS3LDataModule(train_ds, val_ds, batch_size=32, train_sampler="random", train_collate_fn=SwitchTabFirstPhaseCollateFN())
+    train_dl = TS3LDataModule(train_ds, val_ds, batch_size=32, train_sampler="random", 
+                              train_collate_fn=SwitchTabFirstPhaseCollateFN(), 
+                              valid_collate_fn=SwitchTabFirstPhaseCollateFN())
     test_dl = torch.utils.data.DataLoader(test_ds, batch_size=32, shuffle=False)
     
     print("\n" + "="*60)
