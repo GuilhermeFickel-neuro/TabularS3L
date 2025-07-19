@@ -117,7 +117,7 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         return task_loss, y, y_hat_nested[0]  # Use first nested output for metrics
 
 
-def train_model(model_class, config, datamodule, max_epochs=10):
+def train_model(model_class, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10):
     """Train a model with early stopping"""
     pl_model = model_class(config)
     
@@ -129,7 +129,7 @@ def train_model(model_class, config, datamodule, max_epochs=10):
         enable_progress_bar=False,
         enable_model_summary=False
     )
-    trainer.fit(pl_model, datamodule=datamodule)
+    trainer.fit(pl_model, datamodule=first_phase_datamodule)
     
     # Second phase training  
     pl_model.set_second_phase(freeze_encoder=False)
@@ -139,7 +139,7 @@ def train_model(model_class, config, datamodule, max_epochs=10):
         enable_progress_bar=False,
         enable_model_summary=False
     )
-    trainer.fit(pl_model, datamodule=datamodule)
+    trainer.fit(pl_model, datamodule=second_phase_datamodule)
     
     return pl_model
 
@@ -206,15 +206,23 @@ def main():
         optim_hparams={'lr': 0.001}
     )
     
-    # Create datasets
-    train_ds = SwitchTabDataset(X_train, y_train.values, config, continuous_cols=continuous_cols, category_cols=category_cols)
-    val_ds = SwitchTabDataset(X_val, y_val.values, config, continuous_cols=continuous_cols, category_cols=category_cols)
+    # Create datasets for first phase (pretraining)
+    train_ds_phase1 = SwitchTabDataset(X_train, y_train.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=False)
+    val_ds_phase1 = SwitchTabDataset(X_val, y_val.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=False)
+    
+    # Create datasets for second phase (fine-tuning)
+    train_ds_phase2 = SwitchTabDataset(X_train, y_train.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
+    val_ds_phase2 = SwitchTabDataset(X_val, y_val.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     test_ds = SwitchTabDataset(X_test, y_test.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     
-    # Create dataloaders
-    train_dl = TS3LDataModule(train_ds, val_ds, batch_size=32, train_sampler="random", 
-                              train_collate_fn=SwitchTabFirstPhaseCollateFN(), 
-                              valid_collate_fn=SwitchTabFirstPhaseCollateFN())
+    # Create dataloaders for first phase (with special collate function)
+    first_phase_dl = TS3LDataModule(train_ds_phase1, val_ds_phase1, batch_size=32, train_sampler="random", 
+                                    train_collate_fn=SwitchTabFirstPhaseCollateFN(), 
+                                    valid_collate_fn=SwitchTabFirstPhaseCollateFN())
+    
+    # Create dataloaders for second phase (standard collate function)
+    second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, batch_size=32, train_sampler="random")
+    
     test_dl = torch.utils.data.DataLoader(test_ds, batch_size=32, shuffle=False)
     
     print("\n" + "="*60)
@@ -222,7 +230,7 @@ def main():
     print("="*60)
     
     # Train paper-exact SwitchTab
-    exact_model = train_model(PaperExactSwitchTabLightning, config, train_dl)
+    exact_model = train_model(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl)
     
     print("\n" + "="*60) 
     print("Training PaperExactSwitchTabMatryoshka...")
@@ -232,7 +240,7 @@ def main():
     nesting_list = [X_train.shape[1]//4, X_train.shape[1]//2, 3*X_train.shape[1]//4, X_train.shape[1]]
     matryoshka_model = train_model(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
-        config, train_dl
+        config, first_phase_dl, second_phase_dl
     )
     
     print("\n" + "="*60)
