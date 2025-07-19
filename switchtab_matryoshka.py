@@ -181,11 +181,15 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
         # Replace head with Matryoshka head
         self.head = MRL_Linear_Layer(nesting_list=self.nesting_list, num_classes=output_dim, efficient=efficient)
         
-        # Update projectors for largest nesting dimension
+        # Update projectors and decoder for largest nesting dimension
         if self.nesting_list[-1] != self.backbone_module.output_dim:
-            self._projection_layer = nn.Linear(self.backbone_module.output_dim, self.nesting_list[-1])
-            self.projector_m = self._PaperProjector(self.nesting_list[-1])
-            self.projector_s = self._PaperProjector(self.nesting_list[-1])
+            print('ERROR: Nesting list dimension does not match backbone output dimension')
+            exit(1)
+            # self._projection_layer = nn.Linear(self.backbone_module.output_dim, self.nesting_list[-1])
+            # self.projector_m = self._PaperProjector(self.nesting_list[-1])
+            # self.projector_s = self._PaperProjector(self.nesting_list[-1])
+            # # Update decoder to match projected dimension
+            # self.decoder = self._PaperDecoder(self.nesting_list[-1], self.embedding_module.input_dim)
 
     def _first_phase_step(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         size = len(x) // 2

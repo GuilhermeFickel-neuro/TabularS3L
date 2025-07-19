@@ -237,7 +237,9 @@ def main():
     print("="*60)
     
     # Train paper-exact SwitchTab with Matryoshka
-    nesting_list = [X_train.shape[1]//4, X_train.shape[1]//2, 3*X_train.shape[1]//4, X_train.shape[1]]
+    # Use encoder output dimension (d_token) for nesting, not input feature dimension
+    encoder_dim = d_token  # This is the backbone output dimension
+    nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
     matryoshka_model = train_model(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
         config, first_phase_dl, second_phase_dl
