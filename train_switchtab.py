@@ -132,7 +132,7 @@ def train_model(model_class, config, datamodule, max_epochs=10):
     trainer.fit(pl_model, datamodule=datamodule)
     
     # Second phase training  
-    pl_model.set_second_phase()
+    pl_model.set_second_phase(freeze_encoder=False)
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
