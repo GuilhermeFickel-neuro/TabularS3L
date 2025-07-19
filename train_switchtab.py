@@ -185,6 +185,11 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         pl_model.optim_hparams['lr'] = suggested_lr
         pl_model.lr = suggested_lr
         
+        # Update OneCycleLR max_lr to use the suggested learning rate
+        if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
+            pl_model.scheduler_hparams['max_lr'] = suggested_lr
+            print(f"Updated OneCycleLR max_lr to: {suggested_lr}")
+        
         # Plot the LR finder results
         fig = lr_finder.plot(suggest=True)
         fig.show()
@@ -215,6 +220,11 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         # Update the learning rate in both places
         pl_model.optim_hparams['lr'] = suggested_lr
         pl_model.lr = suggested_lr
+        
+        # Update OneCycleLR max_lr to use the suggested learning rate
+        if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
+            pl_model.scheduler_hparams['max_lr'] = suggested_lr
+            print(f"Updated OneCycleLR max_lr to: {suggested_lr}")
         
         # Plot the LR finder results
         fig = lr_finder.plot(suggest=True)
@@ -308,7 +318,7 @@ def main(use_lr_finder=True):
     backbone_config = create_paper_exact_transformer_config(d_model=d_token)
     
     # Calculate steps_per_epoch for OneCycleLR
-    batch_size = 4096
+    batch_size = 128
     max_epochs = 10
     steps_per_epoch = len(X_train) // batch_size + (1 if len(X_train) % batch_size != 0 else 0)
     
