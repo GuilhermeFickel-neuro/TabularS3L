@@ -9,6 +9,8 @@ from pytorch_lightning.callbacks import EarlyStopping
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
 
 # Import the paper-exact implementations
 from switchtab_matryoshka import (
@@ -175,6 +177,34 @@ def extract_embeddings(model, dataloader):
     return torch.cat(embeddings), torch.cat(salient_embeddings) if salient_embeddings else None
 
 
+def compute_ks_metric(model, dataloader):
+    """Compute KS metric on test dataset using scipy.stats.ks_2samp"""
+    model.eval()
+    all_probs = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            x, y = batch
+            logits = model.predict_step(batch, 0)
+            # Handle matryoshka output (list of tensors)
+            if isinstance(logits, list):
+                logits = logits[0]  # Use the largest model output
+            probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of positive class
+            all_probs.append(probs)
+            all_labels.append(y)
+    
+    all_probs = torch.cat(all_probs).cpu().numpy()
+    all_labels = torch.cat(all_labels).cpu().numpy()
+    
+    # Use scipy's ks_2samp directly on the two distributions
+    pos_probs = all_probs[all_labels == 1]
+    neg_probs = all_probs[all_labels == 0]
+    ks_stat, _ = stats.ks_2samp(neg_probs, pos_probs)  # neg first for convention
+    
+    return ks_stat, pos_probs, neg_probs
+
+
 def main():
     # Optimize for Tensor Cores on RTX GPUs
     torch.set_float32_matmul_precision('medium')
@@ -253,26 +283,51 @@ def main():
     )
     
     print("\n" + "="*60)
-    print("Extracting embeddings...")
+    print("Computing KS metrics...")
     print("="*60)
     
-    # Extract embeddings
-    exact_embeddings, exact_salient = extract_embeddings(exact_model, test_dl)
-    matryoshka_embeddings, matryoshka_salient = extract_embeddings(matryoshka_model, test_dl)
+    # Compute KS metrics
+    exact_ks, exact_pos, exact_neg = compute_ks_metric(exact_model, test_dl)
+    matryoshka_ks, matryoshka_pos, matryoshka_neg = compute_ks_metric(matryoshka_model, test_dl)
     
-    print(f"\nResults:")
-    print(f"Paper-exact SwitchTab embeddings shape: {exact_embeddings.shape}")
-    if exact_salient is not None:
-        print(f"Paper-exact salient embeddings shape: {exact_salient.shape}")
+    print(f"\nKS Metrics:")
+    print(f"Paper-exact SwitchTab KS: {exact_ks:.4f}")
+    print(f"Matryoshka SwitchTab KS: {matryoshka_ks:.4f}")
     
-    print(f"Matryoshka embeddings shape: {matryoshka_embeddings.shape}")
-    if matryoshka_salient is not None:
-        print(f"Matryoshka salient embeddings shape: {matryoshka_salient.shape}")
+    # Plot KS comparison
+    plt.figure(figsize=(12, 5))
     
-    print(f"Nesting dimensions: {nesting_list}")
+    # Plot 1: Probability distributions
+    plt.subplot(1, 2, 1)
+    plt.hist(exact_pos, bins=50, alpha=0.7, label='Exact - Positive', density=True)
+    plt.hist(exact_neg, bins=50, alpha=0.7, label='Exact - Negative', density=True)
+    plt.hist(matryoshka_pos, bins=50, alpha=0.7, label='Matryoshka - Positive', density=True)
+    plt.hist(matryoshka_neg, bins=50, alpha=0.7, label='Matryoshka - Negative', density=True)
+    plt.xlabel('Predicted Probability')
+    plt.ylabel('Density')
+    plt.title('Probability Distributions by Class')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
-    print("\n✓ Training completed successfully!")
-    return exact_model, matryoshka_model, exact_embeddings, matryoshka_embeddings
+    # Plot 2: KS comparison bar chart
+    plt.subplot(1, 2, 2)
+    models = ['PaperExact\nSwitchTab', 'Matryoshka\nSwitchTab']
+    ks_values = [exact_ks, matryoshka_ks]
+    bars = plt.bar(models, ks_values, color=['skyblue', 'lightcoral'])
+    plt.ylabel('KS Statistic')
+    plt.title('KS Metric Comparison')
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, ks_values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
+                f'{value:.4f}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print("\n✓ Training and evaluation completed successfully!")
+    return exact_model, matryoshka_model, exact_ks, matryoshka_ks
 
 
 if __name__ == "__main__":
