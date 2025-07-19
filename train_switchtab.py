@@ -23,7 +23,7 @@ from ts3l.utils import TS3LDataModule, get_category_cardinality
 from ts3l.pl_modules.base_module import TS3LLightining
 
 # Load simple dataset
-from benchmark.datasets import load_diabetes
+from benchmark.datasets import load_higgs
 
 
 class PaperExactSwitchTabLightning(TS3LLightining):
@@ -180,7 +180,7 @@ def main():
     torch.set_float32_matmul_precision('medium')
     
     print("Loading dataset...")
-    data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_diabetes()
+    data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_higgs()
     
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(data, label, test_size=0.2, random_state=42)
