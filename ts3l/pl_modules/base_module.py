@@ -87,8 +87,26 @@ class TS3LLightining(ABC, pl.LightningModule):
                     "frequency": 1
                 }
             }
+        elif self.scheduler.__class__.__name__ == 'OneCycleLR':
+            # OneCycleLR should be called every step for optimal performance
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": self.scheduler,
+                    "interval": "step",
+                    "frequency": 1
+                }
+            }
         else:
-            return [self.optimizer], [{'scheduler': self.scheduler, 'interval': 'step'}]
+            # For StepLR, ExponentialLR, CosineAnnealingLR, etc.
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": self.scheduler,
+                    "interval": "epoch",
+                    "frequency": 1
+                }
+            }
 
     def set_first_phase(self) -> None:
         """Set the module to pretraining

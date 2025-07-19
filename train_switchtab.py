@@ -44,6 +44,11 @@ class PaperExactSwitchTabLightning(TS3LLightining):
             output_dim=config.output_dim
         )
 
+    def on_train_epoch_end(self):
+        """Log current learning rate at the end of each epoch"""
+        current_lr = self.optimizers().param_groups[0]['lr']
+        self.log('learning_rate', current_lr, prog_bar=True)
+
     def _get_first_phase_loss(self, batch):
         x_orig, x_corr, y = batch
         size = len(x_orig) // 2
@@ -170,12 +175,15 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
     if use_lr_finder:
         print("Running LR finder for first phase...")
         tuner = Tuner(trainer)
-        lr_finder = tuner.lr_find(pl_model, datamodule=first_phase_datamodule)
+        # Temporarily add lr attribute for LR finder
+        pl_model.lr = pl_model.optim_hparams['lr']
+        lr_finder = tuner.lr_find(pl_model, datamodule=first_phase_datamodule, attr_name='lr')
         suggested_lr = lr_finder.suggestion()
         print(f"Suggested LR for first phase: {suggested_lr}")
         
-        # Update the learning rate
-        pl_model.hparams.optim_hparams['lr'] = suggested_lr
+        # Update the learning rate in both places
+        pl_model.optim_hparams['lr'] = suggested_lr
+        pl_model.lr = suggested_lr
         
         # Plot the LR finder results
         fig = lr_finder.plot(suggest=True)
@@ -198,12 +206,15 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
     if use_lr_finder:
         print("Running LR finder for second phase...")
         tuner = Tuner(trainer)
-        lr_finder = tuner.lr_find(pl_model, datamodule=second_phase_datamodule)
+        # Temporarily add lr attribute for LR finder
+        pl_model.lr = pl_model.optim_hparams['lr']
+        lr_finder = tuner.lr_find(pl_model, datamodule=second_phase_datamodule, attr_name='lr')
         suggested_lr = lr_finder.suggestion()
         print(f"Suggested LR for second phase: {suggested_lr}")
         
-        # Update the learning rate
-        pl_model.hparams.optim_hparams['lr'] = suggested_lr
+        # Update the learning rate in both places
+        pl_model.optim_hparams['lr'] = suggested_lr
+        pl_model.lr = suggested_lr
         
         # Plot the LR finder results
         fig = lr_finder.plot(suggest=True)
@@ -285,7 +296,7 @@ def main(use_lr_finder=True):
     
     # Create configurations according to FT-transformer paper specifications
     # Using d_token=288 as specified in the original FT-transformer config
-    d_token = 192
+    d_token = 512
     
     embedding_config = FTEmbeddingConfig(
         input_dim=X_train.shape[1],
@@ -305,8 +316,8 @@ def main(use_lr_finder=True):
         metric=metric_name,
         optim="Adam",
         optim_hparams={'lr': 0.01},  # Initial LR, will be updated by LR finder
-        scheduler="ReduceLROnPlateau",  # Add learning rate scheduler
-        scheduler_hparams={'mode': 'min', 'factor': 0.5, 'patience': 5}  # Scheduler params (removed deprecated verbose)
+        scheduler="OneCycleLR",  # OneCycleLR for better convergence
+        scheduler_hparams={'max_lr': 0.1, 'epochs': 10, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
     )
     
     # Create datasets for first phase (pretraining)
