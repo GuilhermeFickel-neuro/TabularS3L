@@ -307,6 +307,11 @@ def main(use_lr_finder=True):
     )
     backbone_config = create_paper_exact_transformer_config(d_model=d_token)
     
+    # Calculate steps_per_epoch for OneCycleLR
+    batch_size = 4096
+    max_epochs = 10
+    steps_per_epoch = len(X_train) // batch_size + (1 if len(X_train) % batch_size != 0 else 0)
+    
     config = SwitchTabConfig(
         task="classification",
         embedding_config=embedding_config,
@@ -317,7 +322,7 @@ def main(use_lr_finder=True):
         optim="Adam",
         optim_hparams={'lr': 0.01},  # Initial LR, will be updated by LR finder
         scheduler="OneCycleLR",  # OneCycleLR for better convergence
-        scheduler_hparams={'max_lr': 0.1, 'epochs': 10, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
+        scheduler_hparams={'max_lr': 0.1, 'epochs': max_epochs, 'steps_per_epoch': steps_per_epoch, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
     )
     
     # Create datasets for first phase (pretraining)
@@ -330,21 +335,21 @@ def main(use_lr_finder=True):
     test_ds = SwitchTabDataset(X_test, y_test.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     
     # Create dataloaders for first phase (with special collate function)
-    first_phase_dl = TS3LDataModule(train_ds_phase1, val_ds_phase1, batch_size=4096, n_jobs=4, train_sampler="random", 
+    first_phase_dl = TS3LDataModule(train_ds_phase1, val_ds_phase1, batch_size=batch_size, n_jobs=4, train_sampler="random", 
                                     train_collate_fn=SwitchTabFirstPhaseCollateFN(), 
                                     valid_collate_fn=SwitchTabFirstPhaseCollateFN())
     
     # Create dataloaders for second phase (standard collate function)
-    second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, batch_size=4096, n_jobs=4, train_sampler="random")
+    second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, batch_size=batch_size, n_jobs=4, train_sampler="random")
     
-    test_dl = torch.utils.data.DataLoader(test_ds, batch_size=4096, shuffle=False)
+    test_dl = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
     
     print("\n" + "="*60)
     print("Training PaperExactSwitchTab...")
     print("="*60)
     
     # Train paper-exact SwitchTab with LR finder
-    exact_model = train_model_with_lr_finder(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl, max_epochs=10, use_lr_finder=use_lr_finder)
+    exact_model = train_model_with_lr_finder(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder)
     
     print("\n" + "="*60) 
     print("Training PaperExactSwitchTabMatryoshka...")
@@ -356,7 +361,7 @@ def main(use_lr_finder=True):
     nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
     matryoshka_model = train_model_with_lr_finder(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
-        config, first_phase_dl, second_phase_dl, max_epochs=10, use_lr_finder=use_lr_finder
+        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
     )
     
     print("\n" + "="*60)
