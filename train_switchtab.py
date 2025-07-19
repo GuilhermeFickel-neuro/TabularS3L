@@ -230,7 +230,7 @@ def main():
     # Create dataloaders for second phase (standard collate function)
     second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, batch_size=4096, n_jobs=4, train_sampler="random")
     
-    test_dl = torch.utils.data.DataLoader(test_ds, batch_size=4096, n_jobs=4, shuffle=False)
+    test_dl = torch.utils.data.DataLoader(test_ds, batch_size=4096, shuffle=False)
     
     print("\n" + "="*60)
     print("Training PaperExactSwitchTab...")
