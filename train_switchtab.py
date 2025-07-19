@@ -3,6 +3,7 @@
 Simple training script for PaperExactSwitchTab and PaperExactSwitchTabMatryoshka
 """
 
+import argparse
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
@@ -135,7 +136,7 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -147,7 +148,7 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -166,7 +167,7 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -202,7 +203,7 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -291,6 +292,13 @@ def compute_ks_metric(model, dataloader):
 
 
 def main(use_lr_finder=True):
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train SwitchTab models')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training (default: 128)')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train (default: 10)')
+    parser.add_argument('--d_token', type=int, default=512, help='Token dimension for transformer (default: 512)')
+    args = parser.parse_args()
+    
     # Optimize for Tensor Cores on RTX GPUs
     torch.set_float32_matmul_precision('medium')
     
@@ -305,8 +313,8 @@ def main(use_lr_finder=True):
     print(f"Features: {len(continuous_cols)} continuous, {len(category_cols)} categorical")
     
     # Create configurations according to FT-transformer paper specifications
-    # Using d_token=288 as specified in the original FT-transformer config
-    d_token = 512
+    # Using d_token from command line argument
+    d_token = args.d_token
     
     embedding_config = FTEmbeddingConfig(
         input_dim=X_train.shape[1],
@@ -318,8 +326,8 @@ def main(use_lr_finder=True):
     backbone_config = create_paper_exact_transformer_config(d_model=d_token)
     
     # Calculate steps_per_epoch for OneCycleLR
-    batch_size = 128
-    max_epochs = 10
+    batch_size = args.batch_size
+    max_epochs = args.epochs
     steps_per_epoch = len(X_train) // batch_size + (1 if len(X_train) % batch_size != 0 else 0)
     
     config = SwitchTabConfig(
