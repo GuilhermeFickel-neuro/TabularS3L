@@ -9,6 +9,7 @@ class FTEmbeddingConfig(BaseEmbeddingConfig):
     cont_nums: int = field(default=0)
     cat_cardinality: List[int] = field(default_factory=lambda: [])
     required_token_dim: int = field(default=1)
+    bias: bool = field(default=True)
 
     def __set_output_dim(self):
         if self.required_token_dim == 1:

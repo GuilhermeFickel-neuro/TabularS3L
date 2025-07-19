@@ -1,5 +1,7 @@
 import torch
 from torch import nn
+from torch.nn import init as nn_init
+import math
 from typing import Union, Type, List
 
 from ts3l.utils import BaseEmbeddingConfig
@@ -12,6 +14,7 @@ class FeatureTokenizer(nn.Module):
                  cont_nums: int,
                  cat_cardinality: List[int],
                  required_token_dim: int = 1,
+                 bias: bool = True,
                  **kwargs,
                  ) -> None:
         super().__init__()
@@ -36,7 +39,15 @@ class FeatureTokenizer(nn.Module):
             self.cat_weights = nn.Embedding(sum(cat_cardinality), emb_dim)
 
         self.weight = nn.Parameter(torch.Tensor(cont_nums + 1, emb_dim))
-        self.bias = nn.Parameter(torch.Tensor(bias_dim, emb_dim))
+        self.bias = nn.Parameter(torch.Tensor(bias_dim, emb_dim)) if bias else None
+        
+        # Initialize parameters following FT-transformer specification
+        # The initialization is inspired by nn.Linear and FT-transformer
+        if cat_cardinality is not None:
+            nn_init.kaiming_uniform_(self.cat_weights.weight, a=math.sqrt(5))
+        nn_init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            nn_init.kaiming_uniform_(self.bias, a=math.sqrt(5))
 
         self.n_features = self.cont_nums + self.cat_nums
 
@@ -45,6 +56,17 @@ class FeatureTokenizer(nn.Module):
         else:
             self.flatten_dim = self.emb_dim * (self.n_features + 1)
             self.forward = self.__generate_flattened_token
+
+    @property
+    def n_tokens(self) -> int:
+        """Return the number of tokens that will be generated.
+        
+        This matches the FT-transformer interface.
+        """
+        return len(self.weight) + (
+            0 if not hasattr(self, 'category_offsets') or self.category_offsets is None 
+            else len(self.category_offsets)
+        )
 
     def __generate_tokens(self, x: torch.Tensor) -> torch.Tensor:
         x_cats, x_conts = x[:, :self.cat_nums].long(), x[:, self.cat_nums:]

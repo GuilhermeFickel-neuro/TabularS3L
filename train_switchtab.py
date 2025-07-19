@@ -17,9 +17,9 @@ from switchtab_matryoshka import (
 )
 
 # Import existing utilities
-from ts3l.utils.embedding_utils import IdentityEmbeddingConfig
+from ts3l.utils.embedding_utils import FTEmbeddingConfig
 from ts3l.utils.switchtab_utils import SwitchTabConfig, SwitchTabDataset, SwitchTabFirstPhaseCollateFN
-from ts3l.utils import TS3LDataModule
+from ts3l.utils import TS3LDataModule, get_category_cardinality
 from ts3l.pl_modules.base_module import TS3LLightining
 
 # Load simple dataset
@@ -182,9 +182,18 @@ def main():
     print(f"Dataset: {len(X_train)} train, {len(X_val)} val, {len(X_test)} test samples")
     print(f"Features: {len(continuous_cols)} continuous, {len(category_cols)} categorical")
     
-    # Create configurations
-    embedding_config = IdentityEmbeddingConfig(input_dim=X_train.shape[1])
-    backbone_config = create_paper_exact_transformer_config(d_model=X_train.shape[1])
+    # Create configurations according to FT-transformer paper specifications
+    # Using d_token=288 as specified in the original FT-transformer config
+    d_token = 192
+    
+    embedding_config = FTEmbeddingConfig(
+        input_dim=X_train.shape[1],
+        emb_dim=d_token,  # d_token from FT-transformer config
+        cont_nums=len(continuous_cols),
+        cat_cardinality=get_category_cardinality(X_train, category_cols),
+        required_token_dim=2  # Use 2 for transformer backbone (generates token sequence)
+    )
+    backbone_config = create_paper_exact_transformer_config(d_model=d_token)
     
     config = SwitchTabConfig(
         task="classification",
