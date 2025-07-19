@@ -75,7 +75,20 @@ class TS3LLightining(ABC, pl.LightningModule):
         if self.sched is None:
             return [self.optimizer]
         self.scheduler = self.sched(self.optimizer, **self.scheduler_hparams)
-        return [self.optimizer], [{'scheduler': self.scheduler, 'interval': 'step'}]
+        
+        # Configure scheduler based on type
+        if self.scheduler.__class__.__name__ == 'ReduceLROnPlateau':
+            return {
+                "optimizer": self.optimizer,
+                "lr_scheduler": {
+                    "scheduler": self.scheduler,
+                    "monitor": "val_loss",
+                    "interval": "epoch",
+                    "frequency": 1
+                }
+            }
+        else:
+            return [self.optimizer], [{'scheduler': self.scheduler, 'interval': 'step'}]
 
     def set_first_phase(self) -> None:
         """Set the module to pretraining

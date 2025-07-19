@@ -6,6 +6,7 @@ Simple training script for PaperExactSwitchTab and PaperExactSwitchTabMatryoshka
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
+from pytorch_lightning.tuner import Tuner
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import numpy as np
@@ -130,8 +131,8 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         devices=1,
         max_epochs=max_epochs,
         callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
-        enable_progress_bar=False,
-        enable_model_summary=False
+        enable_progress_bar=True,
+        enable_model_summary=True
     )
     trainer.fit(pl_model, datamodule=first_phase_datamodule)
     
@@ -142,9 +143,72 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         devices=1,
         max_epochs=max_epochs,
         callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
-        enable_progress_bar=False,
-        enable_model_summary=False
+        enable_progress_bar=True,
+        enable_model_summary=True
     )
+    trainer.fit(pl_model, datamodule=second_phase_datamodule)
+    
+    return pl_model
+
+
+def train_model_with_lr_finder(model_class, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10, use_lr_finder=True):
+    """Train a model with LR finder and learning rate scheduling"""
+    pl_model = model_class(config)
+    
+    # First phase training
+    pl_model.set_first_phase()
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=1,
+        max_epochs=max_epochs,
+        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        enable_progress_bar=True,
+        enable_model_summary=True
+    )
+    
+    # Optional LR finder for first phase
+    if use_lr_finder:
+        print("Running LR finder for first phase...")
+        tuner = Tuner(trainer)
+        lr_finder = tuner.lr_find(pl_model, datamodule=first_phase_datamodule)
+        suggested_lr = lr_finder.suggestion()
+        print(f"Suggested LR for first phase: {suggested_lr}")
+        
+        # Update the learning rate
+        pl_model.hparams.optim_hparams['lr'] = suggested_lr
+        
+        # Plot the LR finder results
+        fig = lr_finder.plot(suggest=True)
+        fig.show()
+    
+    trainer.fit(pl_model, datamodule=first_phase_datamodule)
+    
+    # Second phase training  
+    pl_model.set_second_phase(freeze_encoder=False)
+    trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=1,
+        max_epochs=max_epochs,
+        callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
+        enable_progress_bar=True,
+        enable_model_summary=True
+    )
+    
+    # Optional LR finder for second phase
+    if use_lr_finder:
+        print("Running LR finder for second phase...")
+        tuner = Tuner(trainer)
+        lr_finder = tuner.lr_find(pl_model, datamodule=second_phase_datamodule)
+        suggested_lr = lr_finder.suggestion()
+        print(f"Suggested LR for second phase: {suggested_lr}")
+        
+        # Update the learning rate
+        pl_model.hparams.optim_hparams['lr'] = suggested_lr
+        
+        # Plot the LR finder results
+        fig = lr_finder.plot(suggest=True)
+        fig.show()
+    
     trainer.fit(pl_model, datamodule=second_phase_datamodule)
     
     return pl_model
@@ -187,8 +251,8 @@ def compute_ks_metric(model, dataloader):
         for batch in dataloader:
             x, y = batch
             logits = model.predict_step(batch, 0)
-            # Handle matryoshka output (list of tensors)
-            if isinstance(logits, list):
+            # Handle matryoshka output (list or tuple of tensors)
+            if isinstance(logits, (list, tuple)):
                 logits = logits[0]  # Use the largest model output
             probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of positive class
             all_probs.append(probs)
@@ -205,7 +269,7 @@ def compute_ks_metric(model, dataloader):
     return ks_stat, pos_probs, neg_probs
 
 
-def main():
+def main(use_lr_finder=True):
     # Optimize for Tensor Cores on RTX GPUs
     torch.set_float32_matmul_precision('medium')
     
@@ -240,7 +304,9 @@ def main():
         loss_fn="CrossEntropyLoss",
         metric=metric_name,
         optim="Adam",
-        optim_hparams={'lr': 0.001}
+        optim_hparams={'lr': 0.01},  # Initial LR, will be updated by LR finder
+        scheduler="ReduceLROnPlateau",  # Add learning rate scheduler
+        scheduler_hparams={'mode': 'min', 'factor': 0.5, 'patience': 5}  # Scheduler params (removed deprecated verbose)
     )
     
     # Create datasets for first phase (pretraining)
@@ -266,8 +332,8 @@ def main():
     print("Training PaperExactSwitchTab...")
     print("="*60)
     
-    # Train paper-exact SwitchTab
-    exact_model = train_model(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl)
+    # Train paper-exact SwitchTab with LR finder
+    exact_model = train_model_with_lr_finder(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl, max_epochs=10, use_lr_finder=use_lr_finder)
     
     print("\n" + "="*60) 
     print("Training PaperExactSwitchTabMatryoshka...")
@@ -277,9 +343,9 @@ def main():
     # Use encoder output dimension (d_token) for nesting, not input feature dimension
     encoder_dim = d_token  # This is the backbone output dimension
     nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
-    matryoshka_model = train_model(
+    matryoshka_model = train_model_with_lr_finder(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
-        config, first_phase_dl, second_phase_dl
+        config, first_phase_dl, second_phase_dl, max_epochs=10, use_lr_finder=use_lr_finder
     )
     
     print("\n" + "="*60)
@@ -331,4 +397,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    # Set use_lr_finder=False to disable automatic learning rate finding
+    main(use_lr_finder=True) 
