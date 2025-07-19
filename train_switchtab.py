@@ -117,7 +117,7 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         return task_loss, y, y_hat_nested[0]  # Use first nested output for metrics
 
 
-def train_model(model_class, config, train_dataloader, val_dataloader, max_epochs=10):
+def train_model(model_class, config, datamodule, max_epochs=10):
     """Train a model with early stopping"""
     pl_model = model_class(config)
     
@@ -129,7 +129,7 @@ def train_model(model_class, config, train_dataloader, val_dataloader, max_epoch
         enable_progress_bar=False,
         enable_model_summary=False
     )
-    trainer.fit(pl_model, train_dataloader, val_dataloader)
+    trainer.fit(pl_model, datamodule=datamodule)
     
     # Second phase training  
     pl_model.set_second_phase()
@@ -139,7 +139,7 @@ def train_model(model_class, config, train_dataloader, val_dataloader, max_epoch
         enable_progress_bar=False,
         enable_model_summary=False
     )
-    trainer.fit(pl_model, train_dataloader, val_dataloader)
+    trainer.fit(pl_model, datamodule=datamodule)
     
     return pl_model
 
@@ -220,7 +220,7 @@ def main():
     print("="*60)
     
     # Train paper-exact SwitchTab
-    exact_model = train_model(PaperExactSwitchTabLightning, config, train_dl, train_dl)
+    exact_model = train_model(PaperExactSwitchTabLightning, config, train_dl)
     
     print("\n" + "="*60) 
     print("Training PaperExactSwitchTabMatryoshka...")
@@ -230,7 +230,7 @@ def main():
     nesting_list = [X_train.shape[1]//4, X_train.shape[1]//2, 3*X_train.shape[1]//4, X_train.shape[1]]
     matryoshka_model = train_model(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
-        config, train_dl, train_dl
+        config, train_dl
     )
     
     print("\n" + "="*60)
