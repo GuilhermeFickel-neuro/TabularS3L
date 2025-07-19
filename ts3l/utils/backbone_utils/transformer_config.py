@@ -11,6 +11,7 @@ class TransformerBackboneConfig(BaseBackboneConfig):
     hidden_dim: int = field(default=256)
     encoder_depth: int = field(default=3)
     n_head: int = field(default=2)
+    dropout_encoder: float = field(default=0.2)  # Specific dropout for transformer encoder layers
 
     def __post_init__(self):
         self.name = "transformer"

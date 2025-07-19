@@ -7,7 +7,7 @@ class TransformerEncoder(nn.Module):
                  d_model: int,
                  ffn_factor: float,
                  hidden_dim: int,
-                 dropout_rate: float,
+                 dropout_encoder: float,
                  encoder_depth: int = 3,
                  n_head: int = 2,
                  **kwargs) -> None:
@@ -18,7 +18,7 @@ class TransformerEncoder(nn.Module):
             category_dims (List[int]): A list of dimensions of the categorical features.
             ffn_factor (float): The scaling factor for the size of the feedforward network within the transformer blocks.
             hidden_dim (int): The dimensionality of the hidden layers within the network.
-            dropout_rate (float): The dropout rate used within the encoder.
+            dropout_encoder (float): The dropout rate used within the transformer encoder layers.
             encoder_depth (int, optional): The number of layers in the encoder. Defaults to 3.
             n_head (int, optional): The number of attention heads in the encoder. Defaults to 2.
         """
@@ -38,7 +38,7 @@ class TransformerEncoder(nn.Module):
 
         self.encoder_layers = nn.ModuleList([
             nn.TransformerEncoderLayer(d_model=d_model, nhead=n_head, dim_feedforward=int(
-                hidden_dim*ffn_factor), dropout=dropout_rate, batch_first=True)
+                hidden_dim*ffn_factor), dropout=dropout_encoder, batch_first=True)
             for _ in range(encoder_depth)
         ])
 
