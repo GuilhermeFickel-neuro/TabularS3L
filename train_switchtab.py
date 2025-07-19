@@ -124,6 +124,8 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
     # First phase training
     pl_model.set_first_phase()
     trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=1,
         max_epochs=max_epochs,
         callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
         enable_progress_bar=False,
@@ -134,6 +136,8 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
     # Second phase training  
     pl_model.set_second_phase(freeze_encoder=False)
     trainer = pl.Trainer(
+        accelerator='gpu',
+        devices=1,
         max_epochs=max_epochs,
         callbacks=[EarlyStopping(monitor='val_loss', patience=3, mode='min')],
         enable_progress_bar=False,
@@ -172,6 +176,9 @@ def extract_embeddings(model, dataloader):
 
 
 def main():
+    # Optimize for Tensor Cores on RTX GPUs
+    torch.set_float32_matmul_precision('medium')
+    
     print("Loading dataset...")
     data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_diabetes()
     
