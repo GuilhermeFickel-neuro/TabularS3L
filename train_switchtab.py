@@ -297,6 +297,7 @@ def main(use_lr_finder=True):
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training (default: 128)')
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train (default: 10)')
     parser.add_argument('--d_token', type=int, default=512, help='Token dimension for transformer (default: 512)')
+    parser.add_argument('--corruption_rate', type=float, default=0.3, help='Corruption rate for feature corruption (default: 0.3)')
     args = parser.parse_args()
     
     # Optimize for Tensor Cores on RTX GPUs
@@ -335,12 +336,13 @@ def main(use_lr_finder=True):
         embedding_config=embedding_config,
         backbone_config=backbone_config,
         output_dim=output_dim,
+        corruption_rate=args.corruption_rate,
         loss_fn="CrossEntropyLoss",
         metric=metric_name,
-        optim="Adam",
-        optim_hparams={'lr': 0.01},  # Initial LR, will be updated by LR finder
+        optim="RMSprop",
+        optim_hparams={'lr': 0.0003},  # Initial LR, will be updated by LR finder
         scheduler="OneCycleLR",  # OneCycleLR for better convergence
-        scheduler_hparams={'max_lr': 0.1, 'epochs': max_epochs, 'steps_per_epoch': steps_per_epoch, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
+        scheduler_hparams={'max_lr': 0.0003, 'epochs': max_epochs, 'steps_per_epoch': steps_per_epoch, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
     )
     
     # Create datasets for first phase (pretraining)
