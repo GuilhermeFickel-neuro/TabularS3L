@@ -51,6 +51,7 @@ class PaperExactSwitchTabLightning(TS3LLightining):
         """Log current learning rate at the end of each epoch"""
         current_lr = self.optimizers().param_groups[0]['lr']
         self.log('learning_rate', current_lr, prog_bar=True)
+        print('')
 
     def _get_first_phase_loss(self, batch):
         x_orig, x_corr, y = batch
