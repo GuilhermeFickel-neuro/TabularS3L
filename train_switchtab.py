@@ -298,7 +298,19 @@ def main(use_lr_finder=True):
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs to train (default: 10)')
     parser.add_argument('--d_token', type=int, default=512, help='Token dimension for transformer (default: 512)')
     parser.add_argument('--corruption_rate', type=float, default=0.3, help='Corruption rate for feature corruption (default: 0.3)')
+    parser.add_argument('--num_workers', type=int, default=None, help='Number of dataloader workers (default: auto-detect based on CPU cores)')
+    parser.add_argument('--prefetch_factor', type=int, default=4, help='Prefetch factor for dataloader (default: 4)')
     args = parser.parse_args()
+    
+    # Auto-detect optimal number of workers if not specified
+    if args.num_workers is None:
+        import os
+        # Use 75% of available CPU cores, but at least 4 and at most 16
+        num_cores = os.cpu_count() or 4
+        args.num_workers = max(4, min(16, int(num_cores * 0.75)))
+        print(f"Auto-detected {args.num_workers} workers based on {num_cores} CPU cores")
+    else:
+        print(f"Using {args.num_workers} workers as specified")
     
     # Optimize for Tensor Cores on RTX GPUs
     torch.set_float32_matmul_precision('medium')
@@ -354,15 +366,33 @@ def main(use_lr_finder=True):
     val_ds_phase2 = SwitchTabDataset(X_val, y_val.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     test_ds = SwitchTabDataset(X_test, y_test.values, config, continuous_cols=continuous_cols, category_cols=category_cols, is_second_phase=True)
     
-    # Create dataloaders for first phase (with special collate function)
-    first_phase_dl = TS3LDataModule(train_ds_phase1, val_ds_phase1, batch_size=batch_size, n_jobs=4, train_sampler="random", 
+    # Create optimized dataloaders for first phase (with special collate function)
+    first_phase_dl = TS3LDataModule(train_ds_phase1, val_ds_phase1, 
+                                    batch_size=batch_size, 
+                                    n_jobs=args.num_workers, 
+                                    train_sampler="random", 
                                     train_collate_fn=SwitchTabFirstPhaseCollateFN(), 
-                                    valid_collate_fn=SwitchTabFirstPhaseCollateFN())
+                                    valid_collate_fn=SwitchTabFirstPhaseCollateFN(),
+                                    prefetch_factor=args.prefetch_factor,
+                                    persistent_workers=True,
+                                    pin_memory=True)
     
-    # Create dataloaders for second phase (standard collate function)
-    second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, batch_size=batch_size, n_jobs=4, train_sampler="random")
+    # Create optimized dataloaders for second phase (standard collate function)
+    second_phase_dl = TS3LDataModule(train_ds_phase2, val_ds_phase2, 
+                                     batch_size=batch_size, 
+                                     n_jobs=args.num_workers, 
+                                     train_sampler="random",
+                                     prefetch_factor=args.prefetch_factor,
+                                     persistent_workers=True,
+                                     pin_memory=True)
     
-    test_dl = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    test_dl = torch.utils.data.DataLoader(test_ds, 
+                                          batch_size=batch_size, 
+                                          shuffle=False, 
+                                          num_workers=args.num_workers//2,  # Use fewer workers for test
+                                          prefetch_factor=args.prefetch_factor,
+                                          persistent_workers=True if args.num_workers > 0 else False,
+                                          pin_memory=True)
     
     print("\n" + "="*60)
     print("Training PaperExactSwitchTab...")
