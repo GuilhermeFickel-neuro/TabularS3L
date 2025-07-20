@@ -32,8 +32,13 @@ from benchmark.datasets import load_higgs
 
 class PaperExactSwitchTabLightning(TS3LLightining):
     """Lightning wrapper for PaperExactSwitchTab"""
-    def __init__(self, config, temperature=-1.0):
+    def __init__(self, config, temperature=-1.0, use_transformer_projector=False, 
+                 projector_n_heads=8, projector_dim_feedforward=2048, projector_dropout=0.1):
         self.temperature = temperature
+        self.use_transformer_projector = use_transformer_projector
+        self.projector_n_heads = projector_n_heads
+        self.projector_dim_feedforward = projector_dim_feedforward
+        self.projector_dropout = projector_dropout
         super().__init__(config)
         
     def _initialize(self, config):
@@ -44,7 +49,11 @@ class PaperExactSwitchTabLightning(TS3LLightining):
             embedding_config=config.embedding_config,
             backbone_config=config.backbone_config,
             output_dim=config.output_dim,
-            temperature=self.temperature
+            temperature=self.temperature,
+            use_transformer_projector=self.use_transformer_projector,
+            projector_n_heads=self.projector_n_heads,
+            projector_dim_feedforward=self.projector_dim_feedforward,
+            projector_dropout=self.projector_dropout
         )
 
     def on_train_epoch_end(self):
@@ -87,9 +96,12 @@ class PaperExactSwitchTabLightning(TS3LLightining):
 
 class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
     """Lightning wrapper for PaperExactSwitchTabMatryoshka"""
-    def __init__(self, config, nesting_list=None, temperature=-1.0):
+    def __init__(self, config, nesting_list=None, temperature=-1.0, use_transformer_projector=False,
+                 projector_n_heads=8, projector_dim_feedforward=2048, projector_dropout=0.1):
         self.nesting_list = nesting_list
-        super().__init__(config, temperature=temperature)
+        super().__init__(config, temperature=temperature, use_transformer_projector=use_transformer_projector,
+                         projector_n_heads=projector_n_heads, projector_dim_feedforward=projector_dim_feedforward,
+                         projector_dropout=projector_dropout)
         
     def _initialize(self, config):
         self.u_label = -1
@@ -101,7 +113,11 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
             backbone_config=config.backbone_config,
             output_dim=config.output_dim,
             nesting_list=self.nesting_list,
-            temperature=self.temperature
+            temperature=self.temperature,
+            use_transformer_projector=self.use_transformer_projector,
+            projector_n_heads=self.projector_n_heads,
+            projector_dim_feedforward=self.projector_dim_feedforward,
+            projector_dropout=self.projector_dropout
         )
 
     def _get_first_phase_loss(self, batch):
@@ -311,6 +327,10 @@ def main(use_lr_finder=True):
     parser.add_argument('--num_workers', type=int, default=None, help='Number of dataloader workers (default: auto-detect based on CPU cores)')
     parser.add_argument('--prefetch_factor', type=int, default=4, help='Prefetch factor for dataloader (default: 4)')
     parser.add_argument('--temperature', type=float, default=-1.0, help='Temperature for logit normalization, -1 disables it (default: -1.0)')
+    parser.add_argument('--use_transformer_projector', action='store_true', help='Use TransformerEncoderLayer instead of _PaperProjector (default: False)')
+    parser.add_argument('--projector_n_heads', type=int, default=8, help='Number of heads for transformer projector (default: 8)')
+    parser.add_argument('--projector_dim_feedforward', type=int, default=2048, help='Feedforward dimension for transformer projector (default: 2048)')
+    parser.add_argument('--projector_dropout', type=float, default=0.1, help='Dropout rate for transformer projector (default: 0.1)')
     args = parser.parse_args()
     
     # Auto-detect optimal number of workers if not specified
@@ -406,12 +426,24 @@ def main(use_lr_finder=True):
                                           pin_memory=True)
     
     print("\n" + "="*60)
-    print("Training PaperExactSwitchTab...")
+    print(f"Training PaperExactSwitchTab...")
+    print(f"Projector type: {'TransformerEncoderLayer' if args.use_transformer_projector else '_PaperProjector'}")
+    if args.use_transformer_projector:
+        print(f"  - Heads: {args.projector_n_heads}")
+        print(f"  - Feedforward dim: {args.projector_dim_feedforward}")
+        print(f"  - Dropout: {args.projector_dropout}")
     print("="*60)
     
     # Train paper-exact SwitchTab with LR finder
     exact_model = train_model_with_lr_finder(
-        lambda config: PaperExactSwitchTabLightning(config, temperature=args.temperature), 
+        lambda config: PaperExactSwitchTabLightning(
+            config, 
+            temperature=args.temperature,
+            use_transformer_projector=args.use_transformer_projector,
+            projector_n_heads=args.projector_n_heads,
+            projector_dim_feedforward=args.projector_dim_feedforward,
+            projector_dropout=args.projector_dropout
+        ), 
         config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
     )
     
@@ -424,7 +456,15 @@ def main(use_lr_finder=True):
     encoder_dim = d_token  # This is the backbone output dimension
     nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
     matryoshka_model = train_model_with_lr_finder(
-        lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list, temperature=args.temperature), 
+        lambda config: PaperExactSwitchTabMatryoshkaLightning(
+            config, 
+            nesting_list=nesting_list,
+            temperature=args.temperature,
+            use_transformer_projector=args.use_transformer_projector,
+            projector_n_heads=args.projector_n_heads,
+            projector_dim_feedforward=args.projector_dim_feedforward,
+            projector_dropout=args.projector_dropout
+        ), 
         config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
     )
     

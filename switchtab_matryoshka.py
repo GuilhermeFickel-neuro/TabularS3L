@@ -83,6 +83,10 @@ class PaperExactSwitchTab(TS3LModule):
                  backbone_config: BaseBackboneConfig,
                  output_dim: int,
                  temperature: float = -1.0,
+                 use_transformer_projector: bool = False,
+                 projector_n_heads: int = 8,
+                 projector_dim_feedforward: int = 2048,
+                 projector_dropout: float = 0.1,
                  **kwargs) -> None:
         # Force paper-exact transformer configuration
         if backbone_config.name == "transformer":
@@ -94,14 +98,29 @@ class PaperExactSwitchTab(TS3LModule):
         self.t = temperature
         self.__return_salient_feature = False
         
-        # Paper-exact projectors with sigmoid activation
-        self.projector_m = self._PaperProjector(self.backbone_module.output_dim)
-        self.projector_s = self._PaperProjector(self.backbone_module.output_dim)
+        # Create projectors based on configuration
+        self.projector_m = self._create_projector(
+            use_transformer_projector, projector_n_heads, 
+            projector_dim_feedforward, projector_dropout
+        )
+        self.projector_s = self._create_projector(
+            use_transformer_projector, projector_n_heads, 
+            projector_dim_feedforward, projector_dropout
+        )
         
         # Paper-exact decoder with sigmoid activation
         self.decoder = self._PaperDecoder(self.backbone_module.output_dim, self.embedding_module.input_dim)
         self.head = nn.Linear(self.backbone_module.output_dim, output_dim)
         self.activation = nn.SiLU()
+
+    def _create_projector(self, use_transformer: bool, n_heads: int, dim_feedforward: int, dropout: float):
+        """Create projector based on configuration"""
+        if use_transformer:
+            return self._TransformerProjector(
+                self.backbone_module.output_dim, n_heads, dim_feedforward, dropout
+            )
+        else:
+            return self._PaperProjector(self.backbone_module.output_dim)
 
     def _apply_logit_normalization(self, x):
         """Apply logit normalization if temperature > 0"""
@@ -109,6 +128,24 @@ class PaperExactSwitchTab(TS3LModule):
             norms = torch.norm(x, p=2, dim=-1, keepdim=True) + 1e-7
             return torch.div(x, norms) / self.t
         return x
+
+    class _TransformerProjector(nn.Module):
+        def __init__(self, hidden_dim: int, n_heads: int, dim_feedforward: int, dropout: float) -> None:
+            super().__init__()
+            self.transformer_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=n_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True
+            )
+            
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # TransformerEncoderLayer expects (batch, seq_len, d_model)
+            # Our input is (batch, d_model), so we add a sequence dimension
+            x_with_seq = x.unsqueeze(1)  # (batch, 1, d_model)
+            output = self.transformer_layer(x_with_seq)  # (batch, 1, d_model)
+            return output.squeeze(1)  # (batch, d_model)
 
     class _PaperProjector(nn.Module):
         def __init__(self, hidden_dim: int) -> None:
