@@ -136,7 +136,7 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -148,7 +148,7 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -167,7 +167,7 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
@@ -203,7 +203,7 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         accelerator='gpu',
         devices=1,
         max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=5, mode='min')],
+        callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
         enable_progress_bar=True,
         enable_model_summary=True
     )
