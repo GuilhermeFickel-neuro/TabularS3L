@@ -8,6 +8,11 @@ import torch
 import argparse
 import psutil
 import threading
+import gc
+import os
+import signal
+import multiprocessing as mp
+import resource
 from collections import deque
 from sklearn.model_selection import train_test_split
 
@@ -19,6 +24,116 @@ from ts3l.utils.embedding_utils import FTEmbeddingConfig
 from ts3l.utils.switchtab_utils import SwitchTabConfig, SwitchTabDataset, SwitchTabFirstPhaseCollateFN
 from ts3l.utils import TS3LDataModule, get_category_cardinality
 from benchmark.datasets import load_higgs
+
+
+def increase_file_limits():
+    """Temporarily increase file descriptor limits for this process"""
+    try:
+        # Get current limits
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"Current file descriptor limits: soft={soft}, hard={hard}")
+        
+        # Set to maximum possible
+        new_soft = min(hard, 4096)  # Try to increase to 4096 or hard limit
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+        
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        print(f"Updated file descriptor limits: soft={soft}, hard={hard}")
+        return True
+    except Exception as e:
+        print(f"Failed to increase file limits: {e}")
+        return False
+
+
+def get_open_files_count():
+    """Get current number of open file descriptors"""
+    try:
+        pid = os.getpid()
+        return len(os.listdir(f'/proc/{pid}/fd'))
+    except:
+        return -1
+
+
+def kill_orphaned_processes():
+    """Kill any orphaned worker processes"""
+    try:
+        current_pid = os.getpid()
+        parent = psutil.Process(current_pid)
+        
+        # Get all child processes
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                if 'python' in child.name().lower():
+                    print(f"Terminating orphaned process: {child.pid}")
+                    child.terminate()
+                    try:
+                        child.wait(timeout=1)
+                    except psutil.TimeoutExpired:
+                        child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception as e:
+        print(f"Warning during process cleanup: {e}")
+
+
+def aggressive_cleanup(dataloader):
+    """Aggressively clean up dataloader resources"""
+    try:
+        # First, try to access and shutdown any existing iterator
+        if hasattr(dataloader, '_iterator') and dataloader._iterator is not None:
+            try:
+                # Get worker PIDs before shutdown
+                worker_pids = []
+                if hasattr(dataloader._iterator, '_workers'):
+                    for worker in dataloader._iterator._workers:
+                        if hasattr(worker, 'pid'):
+                            worker_pids.append(worker.pid)
+                
+                dataloader._iterator._shutdown_workers()
+                
+                # Force kill any remaining worker processes
+                for pid in worker_pids:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.1)
+                        os.kill(pid, signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+                        
+            except Exception as e:
+                print(f"Warning during iterator shutdown: {e}")
+            
+            dataloader._iterator = None
+            
+        # Force iteration to stop if active
+        if hasattr(dataloader, '_DataLoader__initialized'):
+            dataloader._DataLoader__initialized = False
+            
+        # Clean up dataset references
+        if hasattr(dataloader, 'dataset'):
+            del dataloader.dataset
+            
+        # Clean up batch sampler
+        if hasattr(dataloader, 'batch_sampler'):
+            del dataloader.batch_sampler
+            
+        # Clean up sampler
+        if hasattr(dataloader, 'sampler'):
+            del dataloader.sampler
+            
+    except Exception as e:
+        print(f"Warning during cleanup: {e}")
+    
+    # Kill any orphaned processes
+    kill_orphaned_processes()
+    
+    # Force garbage collection
+    del dataloader
+    gc.collect()
+    
+    # Give system time to clean up
+    time.sleep(0.5)
 
 
 class GPUMonitor:
@@ -71,6 +186,11 @@ class GPUMonitor:
 def benchmark_dataloader(dataloader, name, num_batches=50, warmup_batches=5):
     """Benchmark a dataloader's performance"""
     print(f"\n=== Benchmarking {name} ===")
+    
+    # Monitor file descriptors
+    fds_before = get_open_files_count()
+    if fds_before > 0:
+        print(f"File descriptors before test: {fds_before}")
     
     # GPU monitoring
     gpu_monitor = GPUMonitor()
@@ -141,39 +261,34 @@ def benchmark_dataloader(dataloader, name, num_batches=50, warmup_batches=5):
     }
 
 
-def create_test_dataloaders(num_workers_list, prefetch_factors, X_train, y_train, config, continuous_cols, category_cols):
-    """Create dataloaders with different configurations for testing"""
-    dataloaders = []
+def create_dataloader(num_workers, prefetch_factor, X_train, y_train, config, continuous_cols, category_cols):
+    """Create a single dataloader configuration"""
+    # Create dataset
+    train_ds = SwitchTabDataset(X_train, y_train, config, 
+                              continuous_cols=continuous_cols, 
+                              category_cols=category_cols, 
+                              is_second_phase=False)
+    val_ds = SwitchTabDataset(X_train[:1000], y_train[:1000], config,
+                            continuous_cols=continuous_cols,
+                            category_cols=category_cols,
+                            is_second_phase=False)
     
-    # Test different worker counts
-    for num_workers in num_workers_list:
-        for prefetch_factor in prefetch_factors:
-            # Create dataset
-            train_ds = SwitchTabDataset(X_train, y_train, config, 
-                                      continuous_cols=continuous_cols, 
-                                      category_cols=category_cols, 
-                                      is_second_phase=False)
-            val_ds = SwitchTabDataset(X_train[:1000], y_train[:1000], config,
-                                    continuous_cols=continuous_cols,
-                                    category_cols=category_cols,
-                                    is_second_phase=False)
-            
-            # Create dataloader
-            dl = TS3LDataModule(train_ds, val_ds,
-                              batch_size=128,
-                              n_jobs=num_workers,
-                              train_sampler="random",
-                              train_collate_fn=SwitchTabFirstPhaseCollateFN(),
-                              valid_collate_fn=SwitchTabFirstPhaseCollateFN(),
-                              prefetch_factor=prefetch_factor,
-                              persistent_workers=True,
-                              pin_memory=True)
-            
-            dl.setup("fit")
-            name = f"Workers:{num_workers}, Prefetch:{prefetch_factor}"
-            dataloaders.append((dl.train_dataloader(), name))
-            
-    return dataloaders
+    # Create dataloader with reduced persistent_workers for high worker counts
+    persistent = num_workers <= 8  # Only use persistent workers for lower worker counts
+    
+    dl = TS3LDataModule(train_ds, val_ds,
+                      batch_size=128,
+                      n_jobs=num_workers,
+                      train_sampler="random",
+                      train_collate_fn=SwitchTabFirstPhaseCollateFN(),
+                      valid_collate_fn=SwitchTabFirstPhaseCollateFN(),
+                      prefetch_factor=prefetch_factor,
+                      persistent_workers=persistent,
+                      pin_memory=True)
+    
+    dl.setup("fit")
+    name = f"Workers:{num_workers}, Prefetch:{prefetch_factor}"
+    return dl.train_dataloader(), name
 
 
 def main():
@@ -185,6 +300,14 @@ def main():
     
     print("🚀 Dataloader Performance Benchmark")
     print("=" * 50)
+    
+    # Increase file descriptor limits
+    increase_file_limits()
+    
+    # Check initial file descriptor usage
+    initial_fds = get_open_files_count()
+    if initial_fds > 0:
+        print(f"Initial file descriptors: {initial_fds}")
     
     # Load data
     print("Loading dataset...")
@@ -218,33 +341,82 @@ def main():
     
     # Test configurations
     cpu_count = psutil.cpu_count()
-    num_workers_list = [0, 2, 4, min(8, cpu_count), min(args.max_workers, cpu_count)]
-    prefetch_factors = [2, 4]
+    num_workers_list = [x for x in range(0, min(args.max_workers, cpu_count), 2)]
+    prefetch_factors = [1, 2, 3, 4, 5, 6, 7, 8]
     
     print(f"\n🧪 Testing worker counts: {num_workers_list}")
     print(f"🧪 Testing prefetch factors: {prefetch_factors}")
     
-    # Create test dataloaders
-    dataloaders = create_test_dataloaders(
-        num_workers_list, prefetch_factors, 
-        X_train, y_train.values, config, 
-        continuous_cols, category_cols
-    )
-    
     # Benchmark each configuration
     results = []
-    for dataloader, name in dataloaders:
-        result = benchmark_dataloader(dataloader, name, args.num_batches)
-        result['name'] = name
-        results.append(result)
-        
-        # Small delay between tests
-        time.sleep(1)
+    total_configs = len(num_workers_list) * len(prefetch_factors)
+    current_config = 0
+    
+    for num_workers in num_workers_list:
+        for prefetch_factor in prefetch_factors:
+            current_config += 1
+            print(f"\n🔄 Testing configuration {current_config}/{total_configs}: Workers={num_workers}, Prefetch={prefetch_factor}")
+            
+            # Monitor file descriptors before creating dataloader
+            fds_before = get_open_files_count()
+            if fds_before > 0:
+                print(f"File descriptors before creation: {fds_before}")
+                
+                # Safety check - if we're getting close to limit, do extra cleanup
+                if fds_before > 800:
+                    print("⚠️  High file descriptor usage - doing extra cleanup")
+                    kill_orphaned_processes()
+                    gc.collect()
+                    time.sleep(1)
+            
+            try:
+                # Create dataloader on demand
+                dataloader, name = create_dataloader(
+                    num_workers, prefetch_factor,
+                    X_train, y_train.values, config, 
+                    continuous_cols, category_cols
+                )
+                
+                result = benchmark_dataloader(dataloader, name, args.num_batches)
+                result['name'] = name
+                results.append(result)
+                
+            except Exception as e:
+                print(f"❌ Failed to test {name}: {e}")
+                # Do emergency cleanup
+                kill_orphaned_processes()
+                gc.collect()
+                time.sleep(1)
+                continue
+                
+            finally:
+                # Aggressive cleanup
+                try:
+                    aggressive_cleanup(dataloader)
+                except:
+                    pass
+                
+                # Monitor file descriptors after cleanup
+                fds_after = get_open_files_count()
+                if fds_after > 0:
+                    print(f"File descriptors after cleanup: {fds_after}")
+                
+                # Extra delay for higher worker counts
+                delay = 3 if num_workers >= 12 else 2
+                time.sleep(delay)
+    
+    # Final cleanup
+    kill_orphaned_processes()
+    gc.collect()
     
     # Print summary
     print("\n" + "=" * 60)
     print("📋 PERFORMANCE SUMMARY")
     print("=" * 60)
+    
+    if not results:
+        print("❌ No successful tests completed!")
+        return
     
     # Sort by batches per second
     results.sort(key=lambda x: x['batches_per_sec'], reverse=True)
