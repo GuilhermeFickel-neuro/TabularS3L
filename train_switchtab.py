@@ -32,7 +32,8 @@ from benchmark.datasets import load_higgs
 
 class PaperExactSwitchTabLightning(TS3LLightining):
     """Lightning wrapper for PaperExactSwitchTab"""
-    def __init__(self, config):
+    def __init__(self, config, temperature=-1.0):
+        self.temperature = temperature
         super().__init__(config)
         
     def _initialize(self, config):
@@ -42,7 +43,8 @@ class PaperExactSwitchTabLightning(TS3LLightining):
         self.model = PaperExactSwitchTab(
             embedding_config=config.embedding_config,
             backbone_config=config.backbone_config,
-            output_dim=config.output_dim
+            output_dim=config.output_dim,
+            temperature=self.temperature
         )
 
     def on_train_epoch_end(self):
@@ -84,9 +86,9 @@ class PaperExactSwitchTabLightning(TS3LLightining):
 
 class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
     """Lightning wrapper for PaperExactSwitchTabMatryoshka"""
-    def __init__(self, config, nesting_list=None):
+    def __init__(self, config, nesting_list=None, temperature=-1.0):
         self.nesting_list = nesting_list
-        super().__init__(config)
+        super().__init__(config, temperature=temperature)
         
     def _initialize(self, config):
         self.u_label = -1
@@ -97,7 +99,8 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
             embedding_config=config.embedding_config,
             backbone_config=config.backbone_config,
             output_dim=config.output_dim,
-            nesting_list=self.nesting_list
+            nesting_list=self.nesting_list,
+            temperature=self.temperature
         )
 
     def _get_first_phase_loss(self, batch):
@@ -273,21 +276,27 @@ def compute_ks_metric(model, dataloader):
         for batch in dataloader:
             x, y = batch
             logits = model.predict_step(batch, 0)
-            # Handle matryoshka output (list or tuple of tensors)
+            
+            # Handle matryoshka output
             if isinstance(logits, (list, tuple)):
-                logits = logits[0]  # Use the largest model output
-            probs = torch.softmax(logits, dim=1)[:, 1]  # Get probability of positive class
+                logits = logits[0]
+            
+            # Convert to probabilities
+            if logits.shape[1] == 2:
+                probs = torch.softmax(logits, dim=1)[:, 1].cpu()
+            else:
+                probs = torch.sigmoid(logits.squeeze()).cpu()
+                
             all_probs.append(probs)
-            all_labels.append(y)
+            all_labels.append(y.cpu())
     
-    all_probs = torch.cat(all_probs).cpu().numpy()
-    all_labels = torch.cat(all_labels).cpu().numpy()
+    all_probs = torch.cat(all_probs).numpy()
+    all_labels = torch.cat(all_labels).numpy()
     
-    # Use scipy's ks_2samp directly on the two distributions
     pos_probs = all_probs[all_labels == 1]
     neg_probs = all_probs[all_labels == 0]
-    ks_stat, _ = stats.ks_2samp(neg_probs, pos_probs)  # neg first for convention
     
+    ks_stat, _ = stats.ks_2samp(neg_probs, pos_probs)
     return ks_stat, pos_probs, neg_probs
 
 
@@ -300,6 +309,7 @@ def main(use_lr_finder=True):
     parser.add_argument('--corruption_rate', type=float, default=0.3, help='Corruption rate for feature corruption (default: 0.3)')
     parser.add_argument('--num_workers', type=int, default=None, help='Number of dataloader workers (default: auto-detect based on CPU cores)')
     parser.add_argument('--prefetch_factor', type=int, default=4, help='Prefetch factor for dataloader (default: 4)')
+    parser.add_argument('--temperature', type=float, default=-1.0, help='Temperature for logit normalization, -1 disables it (default: -1.0)')
     args = parser.parse_args()
     
     # Auto-detect optimal number of workers if not specified
@@ -399,7 +409,10 @@ def main(use_lr_finder=True):
     print("="*60)
     
     # Train paper-exact SwitchTab with LR finder
-    exact_model = train_model_with_lr_finder(PaperExactSwitchTabLightning, config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder)
+    exact_model = train_model_with_lr_finder(
+        lambda config: PaperExactSwitchTabLightning(config, temperature=args.temperature), 
+        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
+    )
     
     print("\n" + "="*60) 
     print("Training PaperExactSwitchTabMatryoshka...")
@@ -410,7 +423,7 @@ def main(use_lr_finder=True):
     encoder_dim = d_token  # This is the backbone output dimension
     nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
     matryoshka_model = train_model_with_lr_finder(
-        lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list), 
+        lambda config: PaperExactSwitchTabMatryoshkaLightning(config, nesting_list, temperature=args.temperature), 
         config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
     )
     

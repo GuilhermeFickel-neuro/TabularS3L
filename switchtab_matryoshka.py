@@ -82,6 +82,7 @@ class PaperExactSwitchTab(TS3LModule):
                  embedding_config: BaseEmbeddingConfig,
                  backbone_config: BaseBackboneConfig,
                  output_dim: int,
+                 temperature: float = -1.0,
                  **kwargs) -> None:
         # Force paper-exact transformer configuration
         if backbone_config.name == "transformer":
@@ -90,6 +91,7 @@ class PaperExactSwitchTab(TS3LModule):
         
         super(PaperExactSwitchTab, self).__init__(embedding_config, backbone_config)
         self.output_dim = output_dim
+        self.t = temperature
         self.__return_salient_feature = False
         
         # Paper-exact projectors with sigmoid activation
@@ -100,6 +102,13 @@ class PaperExactSwitchTab(TS3LModule):
         self.decoder = self._PaperDecoder(self.backbone_module.output_dim, self.embedding_module.input_dim)
         self.head = nn.Linear(self.backbone_module.output_dim, output_dim)
         self.activation = nn.SiLU()
+
+    def _apply_logit_normalization(self, x):
+        """Apply logit normalization if temperature > 0"""
+        if self.t > 0:
+            norms = torch.norm(x, p=2, dim=-1, keepdim=True) + 1e-7
+            return torch.div(x, norms) / self.t
+        return x
 
     class _PaperProjector(nn.Module):
         def __init__(self, hidden_dim: int) -> None:
@@ -150,6 +159,7 @@ class PaperExactSwitchTab(TS3LModule):
         
         x_hat = torch.concat([x1_recover_switch, x2_switch_recover])
         y_hat = self.head(self.activation(zs))
+        y_hat = self._apply_logit_normalization(y_hat)
 
         return x_hat, y_hat
 
@@ -157,6 +167,7 @@ class PaperExactSwitchTab(TS3LModule):
         x = self.embedding_module(x)
         emb = self.encoder(x)
         y_hat = self.head(self.activation(emb))
+        y_hat = self._apply_logit_normalization(y_hat)
         if not self.return_salient_feature:
             return y_hat
         else:
@@ -172,8 +183,9 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
                  output_dim: int,
                  nesting_list: List[int],
                  efficient: bool = True,
+                 temperature: float = -1.0,
                  **kwargs) -> None:
-        super(PaperExactSwitchTabMatryoshka, self).__init__(embedding_config, backbone_config, output_dim, **kwargs)
+        super(PaperExactSwitchTabMatryoshka, self).__init__(embedding_config, backbone_config, output_dim, temperature=temperature, **kwargs)
         
         # Set up nesting dimensions
         self.nesting_list = nesting_list
@@ -185,6 +197,11 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
             print('ERROR: Nesting list dimension does not match backbone output dimension')
             exit(1)
 
+    def _apply_logit_normalization_nested(self, nested_logits):
+        """Apply logit normalization to nested outputs if temperature > 0"""
+        if self.t > 0:
+            return tuple(self._apply_logit_normalization(logits) for logits in nested_logits)
+        return nested_logits
 
     def _first_phase_step(self, x: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
         size = len(x) // 2
@@ -209,6 +226,7 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
         
         x_hat = torch.concat([x1_recover_switch, x2_switch_recover])
         y_hat_nested = self.head(self.activation(zs))
+        y_hat_nested = self._apply_logit_normalization_nested(y_hat_nested)
 
         return x_hat, y_hat_nested
 
@@ -221,6 +239,7 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
             emb = self._projection_layer(emb)
         
         y_hat_nested = self.head(self.activation(emb))
+        y_hat_nested = self._apply_logit_normalization_nested(y_hat_nested)
         
         if not self.return_salient_feature:
             return y_hat_nested
