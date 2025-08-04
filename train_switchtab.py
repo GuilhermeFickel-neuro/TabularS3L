@@ -107,6 +107,9 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
                          projector_dropout=projector_dropout)
         
     def _initialize(self, config):
+        # Call parent initialization first to set up task_loss_fn and other base components
+        super()._initialize(config)
+        
         self.u_label = -1
         self.alpha = 1.0
         self.reconstruction_loss_fn = torch.nn.MSELoss()
@@ -130,6 +133,14 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         x_combined = torch.cat([x_corr[:size], x_corr[size:]])
         x_hat, y_hat_nested = self.model._first_phase_step(x_combined)
         
+        # Debug: Check for NaN/inf in outputs
+        if torch.isnan(x_hat).any() or torch.isinf(x_hat).any():
+            print("Warning: NaN/Inf detected in reconstruction output")
+        
+        for i, y_hat in enumerate(y_hat_nested):
+            if torch.isnan(y_hat).any() or torch.isinf(y_hat).any():
+                print(f"Warning: NaN/Inf detected in nested output {i}")
+        
         # Reconstruction loss
         recon_loss = self.reconstruction_loss_fn(x_hat, torch.cat([x_orig[:size], x_orig[size:], x_orig[:size], x_orig[size:]]))
         
@@ -137,16 +148,75 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         labeled_mask = y != self.u_label
         if labeled_mask.any():
             task_loss = self.matryoshka_loss_fn(y_hat_nested, y[labeled_mask])
+            
+            # Debug: Check task loss components
+            if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:  # Log every 10 epochs, every 100 steps
+                with torch.no_grad():
+                    print(f"[Debug] Epoch {self.current_epoch}: recon_loss={recon_loss.item():.4f}, "
+                          f"task_loss={task_loss.item():.4f}, labeled_samples={labeled_mask.sum().item()}")
+                    # Check individual nested outputs
+                    for i, y_hat in enumerate(y_hat_nested):
+                        pred_mean = y_hat[labeled_mask].mean().item()
+                        pred_std = y_hat[labeled_mask].std().item()
+                        print(f"  Nested output {i}: mean={pred_mean:.4f}, std={pred_std:.4f}")
         else:
             task_loss = torch.tensor(0.0)
             
-        return recon_loss + self.alpha * task_loss
+        total_loss = recon_loss + self.alpha * task_loss
+        
+        # Debug: Check final loss
+        if torch.isnan(total_loss).any() or torch.isinf(total_loss).any():
+            print("Warning: NaN/Inf detected in total loss")
+            
+        return total_loss
 
     def _get_second_phase_loss(self, batch):
         x, y = batch
         y_hat_nested = self.model._second_phase_step(x)
+        
+        # Debug: Check for NaN/inf in nested outputs
+        for i, y_hat in enumerate(y_hat_nested):
+            if torch.isnan(y_hat).any() or torch.isinf(y_hat).any():
+                print(f"Warning: NaN/Inf detected in second phase nested output {i}")
+        
         task_loss = self.matryoshka_loss_fn(y_hat_nested, y)
+        
+        # Debug: Check task loss and predictions
+        if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:
+            with torch.no_grad():
+                print(f"[Debug Second Phase] Epoch {self.current_epoch}: task_loss={task_loss.item():.4f}")
+                for i, y_hat in enumerate(y_hat_nested):
+                    pred_mean = y_hat.mean().item()
+                    pred_std = y_hat.std().item()
+                    print(f"  Second phase nested output {i}: mean={pred_mean:.4f}, std={pred_std:.4f}")
+        
         return task_loss, y, y_hat_nested[0]  # Use first nested output for metrics
+    
+    def on_before_optimizer_step(self, optimizer):
+        """Check gradients before optimizer step"""
+        if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:
+            # Check gradients in MRL layer
+            mrl_layer = self.model.head
+            grad_norms = []
+            
+            for name, param in mrl_layer.named_parameters():
+                if param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    grad_norms.append(grad_norm)
+                    if grad_norm == 0:
+                        print(f"Warning: Zero gradient in MRL layer parameter: {name}")
+                    elif torch.isnan(param.grad).any():
+                        print(f"Warning: NaN gradient in MRL layer parameter: {name}")
+                else:
+                    print(f"Warning: No gradient for MRL layer parameter: {name}")
+            
+            if grad_norms:
+                avg_grad_norm = sum(grad_norms) / len(grad_norms)
+                print(f"[Debug Gradients] Epoch {self.current_epoch}: MRL avg grad norm={avg_grad_norm:.6f}")
+            else:
+                print(f"[Debug Gradients] Epoch {self.current_epoch}: No gradients found in MRL layer")
+        
+        super().on_before_optimizer_step(optimizer)
 
 
 def train_model(model_class, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10):
@@ -295,20 +365,39 @@ def compute_ks_metric(model, dataloader):
     with torch.no_grad():
         for batch in dataloader:
             x, y = batch
-            logits = model.predict_step(batch, 0)
-            
-            # Handle matryoshka output
-            if isinstance(logits, (list, tuple)):
-                logits = logits[0]
-            
-            # Convert to probabilities
-            if logits.shape[1] == 2:
-                probs = torch.softmax(logits, dim=1)[:, 1].cpu()
-            else:
-                probs = torch.sigmoid(logits.squeeze()).cpu()
+            try:
+                logits = model.predict_step(batch, 0)
                 
-            all_probs.append(probs)
-            all_labels.append(y.cpu())
+                # Handle matryoshka output
+                if isinstance(logits, (list, tuple)):
+                    logits = logits[0]
+                
+                # Validate logits
+                if logits is None or torch.isnan(logits).any() or torch.isinf(logits).any():
+                    print(f"Warning: Invalid logits detected, skipping batch")
+                    continue
+                
+                # Convert to probabilities
+                if logits.shape[1] == 2:
+                    probs = torch.softmax(logits, dim=1)[:, 1].cpu()
+                else:
+                    probs = torch.sigmoid(logits.squeeze()).cpu()
+                
+                # Validate probabilities
+                if torch.isnan(probs).any() or torch.isinf(probs).any():
+                    print(f"Warning: Invalid probabilities detected, skipping batch")
+                    continue
+                    
+                all_probs.append(probs)
+                all_labels.append(y.cpu())
+                
+            except Exception as e:
+                print(f"Warning: Error in prediction step: {e}, skipping batch")
+                continue
+    
+    if not all_probs:
+        print("Error: No valid predictions obtained")
+        return float('nan'), np.array([]), np.array([])
     
     all_probs = torch.cat(all_probs).numpy()
     all_labels = torch.cat(all_labels).numpy()
@@ -316,8 +405,25 @@ def compute_ks_metric(model, dataloader):
     pos_probs = all_probs[all_labels == 1]
     neg_probs = all_probs[all_labels == 0]
     
-    ks_stat, _ = stats.ks_2samp(neg_probs, pos_probs)
-    return ks_stat, pos_probs, neg_probs
+    # Validate we have samples for both classes
+    if len(pos_probs) == 0 or len(neg_probs) == 0:
+        print(f"Warning: Missing samples - pos: {len(pos_probs)}, neg: {len(neg_probs)}")
+        return float('nan'), pos_probs, neg_probs
+    
+    # Check for constant predictions (no discrimination)
+    if np.allclose(pos_probs, neg_probs, rtol=1e-10) or np.var(all_probs) < 1e-10:
+        print("Warning: Model shows no discrimination between classes (constant predictions)")
+        return 0.0, pos_probs, neg_probs
+    
+    try:
+        ks_stat, _ = stats.ks_2samp(neg_probs, pos_probs)
+        if np.isnan(ks_stat):
+            print("Warning: KS statistic is NaN, likely due to identical distributions")
+            return 0.0, pos_probs, neg_probs
+        return ks_stat, pos_probs, neg_probs
+    except Exception as e:
+        print(f"Error computing KS statistic: {e}")
+        return float('nan'), pos_probs, neg_probs
 
 
 def main(use_lr_finder=True):
@@ -484,7 +590,42 @@ def main(use_lr_finder=True):
     # Train paper-exact SwitchTab with Matryoshka
     # Use encoder output dimension (d_token) for nesting, not input feature dimension
     encoder_dim = d_token  # This is the backbone output dimension
-    nesting_list = [encoder_dim//4, encoder_dim//2, 3*encoder_dim//4, encoder_dim]
+    
+    # Validate and calculate nesting dimensions properly
+    print(f"Encoder dimension: {encoder_dim}")
+    
+    # Ensure encoder_dim is divisible by 4 for proper nesting
+    if encoder_dim % 4 != 0:
+        print(f"Warning: encoder_dim ({encoder_dim}) is not divisible by 4. This may cause dimension issues.")
+        print("Consider using a d_token value divisible by 4 for optimal Matryoshka performance.")
+    
+    # Calculate nesting list with proper validation
+    nesting_list = [
+        max(1, encoder_dim // 4),      # Ensure minimum dimension of 1
+        max(1, encoder_dim // 2),      # Ensure minimum dimension of 1  
+        max(1, 3 * encoder_dim // 4),  # Ensure minimum dimension of 1
+        encoder_dim                    # Full dimension
+    ]
+    
+    # Remove duplicates and sort (in case of small encoder_dim)
+    nesting_list = sorted(list(set(nesting_list)))
+    
+    print(f"Nesting list: {nesting_list}")
+    
+    # Validate nesting list integrity
+    if len(nesting_list) < 2:
+        raise ValueError(f"Nesting list too short ({nesting_list}). Need at least 2 different dimensions. "
+                        f"Consider increasing d_token (current: {encoder_dim})")
+    
+    if nesting_list[-1] != encoder_dim:
+        raise ValueError(f"Last nesting dimension ({nesting_list[-1]}) must equal encoder_dim ({encoder_dim})")
+    
+    # Check for reasonable progression
+    for i in range(1, len(nesting_list)):
+        ratio = nesting_list[i] / nesting_list[i-1]
+        if ratio < 1.2:  # Less than 20% increase
+            print(f"Warning: Small progression between nesting dimensions {nesting_list[i-1]} -> {nesting_list[i]} "
+                 f"(ratio: {ratio:.2f}). This may reduce Matryoshka effectiveness.")
     matryoshka_model = train_model_with_lr_finder(
         lambda config: PaperExactSwitchTabMatryoshkaLightning(
             config, 
@@ -507,40 +648,77 @@ def main(use_lr_finder=True):
     matryoshka_ks, matryoshka_pos, matryoshka_neg = compute_ks_metric(matryoshka_model, test_dl)
     
     print(f"\nKS Metrics:")
-    print(f"Paper-exact SwitchTab KS: {exact_ks:.4f}")
-    print(f"Matryoshka SwitchTab KS: {matryoshka_ks:.4f}")
+    if np.isnan(exact_ks):
+        print(f"Paper-exact SwitchTab KS: NaN (model prediction issue)")
+    else:
+        print(f"Paper-exact SwitchTab KS: {exact_ks:.4f}")
     
-    # Plot KS comparison
-    plt.figure(figsize=(12, 5))
+    if np.isnan(matryoshka_ks):
+        print(f"Matryoshka SwitchTab KS: NaN (model prediction issue)")
+    else:
+        print(f"Matryoshka SwitchTab KS: {matryoshka_ks:.4f}")
     
-    # Plot 1: Probability distributions
-    plt.subplot(1, 2, 1)
-    plt.hist(exact_pos, bins=50, alpha=0.7, label='Exact - Positive', density=True)
-    plt.hist(exact_neg, bins=50, alpha=0.7, label='Exact - Negative', density=True)
-    plt.hist(matryoshka_pos, bins=50, alpha=0.7, label='Matryoshka - Positive', density=True)
-    plt.hist(matryoshka_neg, bins=50, alpha=0.7, label='Matryoshka - Negative', density=True)
-    plt.xlabel('Predicted Probability')
-    plt.ylabel('Density')
-    plt.title('Probability Distributions by Class')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # Plot KS comparison (only if we have valid data)
+    has_valid_exact = len(exact_pos) > 0 and len(exact_neg) > 0 and not np.isnan(exact_ks)
+    has_valid_matryoshka = len(matryoshka_pos) > 0 and len(matryoshka_neg) > 0 and not np.isnan(matryoshka_ks)
     
-    # Plot 2: KS comparison bar chart
-    plt.subplot(1, 2, 2)
-    models = ['PaperExact\nSwitchTab', 'Matryoshka\nSwitchTab']
-    ks_values = [exact_ks, matryoshka_ks]
-    bars = plt.bar(models, ks_values, color=['skyblue', 'lightcoral'])
-    plt.ylabel('KS Statistic')
-    plt.title('KS Metric Comparison')
-    plt.grid(True, alpha=0.3, axis='y')
-    
-    # Add value labels on bars
-    for bar, value in zip(bars, ks_values):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
-                f'{value:.4f}', ha='center', va='bottom')
-    
-    plt.tight_layout()
-    plt.show()
+    if has_valid_exact or has_valid_matryoshka:
+        plt.figure(figsize=(12, 5))
+        
+        # Plot 1: Probability distributions
+        plt.subplot(1, 2, 1)
+        if has_valid_exact:
+            plt.hist(exact_pos, bins=50, alpha=0.7, label='Exact - Positive', density=True)
+            plt.hist(exact_neg, bins=50, alpha=0.7, label='Exact - Negative', density=True)
+        if has_valid_matryoshka:
+            plt.hist(matryoshka_pos, bins=50, alpha=0.7, label='Matryoshka - Positive', density=True)
+            plt.hist(matryoshka_neg, bins=50, alpha=0.7, label='Matryoshka - Negative', density=True)
+        
+        plt.xlabel('Predicted Probability')
+        plt.ylabel('Density')
+        plt.title('Probability Distributions by Class')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 2: KS comparison bar chart
+        plt.subplot(1, 2, 2)
+        models = []
+        ks_values = []
+        colors = []
+        
+        if has_valid_exact:
+            models.append('PaperExact\nSwitchTab')
+            ks_values.append(exact_ks)
+            colors.append('skyblue')
+        
+        if has_valid_matryoshka:
+            models.append('Matryoshka\nSwitchTab')
+            ks_values.append(matryoshka_ks)
+            colors.append('lightcoral')
+        
+        if models:  # Only plot if we have at least one valid model
+            bars = plt.bar(models, ks_values, color=colors)
+            plt.ylabel('KS Statistic')
+            plt.title('KS Metric Comparison')
+            plt.grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on bars
+            for bar, ks_val in zip(bars, ks_values):
+                height = bar.get_height()
+                plt.text(bar.get_x() + bar.get_width()/2., height + 0.001, f'{ks_val:.3f}',
+                        ha='center', va='bottom')
+        else:
+            plt.text(0.5, 0.5, 'No valid KS metrics to display', 
+                    ha='center', va='center', transform=plt.gca().transAxes,
+                    fontsize=14, bbox=dict(boxstyle="round", facecolor='wheat', alpha=0.5))
+            plt.xlim(0, 1)
+            plt.ylim(0, 1)
+            plt.title('KS Metric Comparison')
+        
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("Warning: No valid probability distributions to plot - both models failed to produce valid predictions")
     
     print("\n✓ Training and evaluation completed successfully!")
     return exact_model, matryoshka_model, exact_ks, matryoshka_ks
