@@ -29,6 +29,9 @@ from ts3l.pl_modules.base_module import TS3LLightining
 # Load simple dataset
 from benchmark.datasets import load_higgs
 
+# Import custom dataset loader
+from custom_dataset import load_custom_dataset_with_split, load_custom_dataset
+
 
 class PaperExactSwitchTabLightning(TS3LLightining):
     """Lightning wrapper for PaperExactSwitchTab"""
@@ -59,7 +62,7 @@ class PaperExactSwitchTabLightning(TS3LLightining):
     def on_train_epoch_end(self):
         """Log current learning rate at the end of each epoch"""
         current_lr = self.optimizers().param_groups[0]['lr']
-        self.log('learning_rate', current_lr, prog_bar=True)
+        self.log('lr', current_lr, prog_bar=True)
         print('')
 
     def _get_first_phase_loss(self, batch):
@@ -331,6 +334,13 @@ def main(use_lr_finder=True):
     parser.add_argument('--projector_n_heads', type=int, default=8, help='Number of heads for transformer projector (default: 8)')
     parser.add_argument('--projector_dim_feedforward', type=int, default=2048, help='Feedforward dimension for transformer projector (default: 2048)')
     parser.add_argument('--projector_dropout', type=float, default=0.1, help='Dropout rate for transformer projector (default: 0.1)')
+    
+    # Custom dataset arguments
+    parser.add_argument('--train_path', type=str, default=None, help='Path to custom training CSV file (tab-separated). If provided, uses custom dataset instead of Higgs.')
+    parser.add_argument('--test_path', type=str, default=None, help='Path to custom test CSV file (tab-separated). Optional - if not provided, will split train_path.')
+    parser.add_argument('--target', type=str, default=None, help='Name of the target column in custom dataset.')
+    parser.add_argument('--max_size', type=int, default=100000, help='Maximum number of rows to load from custom dataset to prevent OOM (default: 100000)')
+    
     args = parser.parse_args()
     
     # Auto-detect optimal number of workers if not specified
@@ -346,12 +356,32 @@ def main(use_lr_finder=True):
     # Optimize for Tensor Cores on RTX GPUs
     torch.set_float32_matmul_precision('medium')
     
-    print("Loading dataset...")
-    data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_higgs()
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(data, label, test_size=0.2, random_state=42)
-    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+    # Check if custom dataset is specified
+    if args.train_path:
+        if not args.target:
+            raise ValueError("--target must be specified when using custom dataset (--train_path)")
+        
+        print("Loading custom dataset...")
+        if args.test_path:
+            # Load train and test separately
+            X_train_full, X_test, y_train_full, y_test, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_custom_dataset(
+                args.train_path, args.test_path, args.target, max_size=args.max_size
+            )
+            # Split train into train/val
+            X_train, X_val, y_train, y_val = train_test_split(X_train_full, y_train_full, test_size=0.2, random_state=42, stratify=True)
+        else:
+            # Load and split single file
+            X_train, X_val, X_test, y_train, y_val, y_test, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_custom_dataset_with_split(
+                args.train_path, args.target, test_size=0.2, val_size=0.2, random_state=42, max_size=args.max_size
+            )
+    else:
+        # Use default Higgs dataset
+        print("Loading Higgs dataset...")
+        data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_higgs()
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(data, label, test_size=0.2, random_state=42)
+        X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
     
     print(f"Dataset: {len(X_train)} train, {len(X_val)} val, {len(X_test)} test samples")
     print(f"Features: {len(continuous_cols)} continuous, {len(category_cols)} categorical")
