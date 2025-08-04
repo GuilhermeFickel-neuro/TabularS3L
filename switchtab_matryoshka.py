@@ -200,6 +200,17 @@ class PaperExactSwitchTab(TS3LModule):
 
         return x_hat, y_hat
 
+    def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Main forward pass. Delegates to phase-specific methods.
+        - In training mode, uses _first_phase_step.
+        - In eval mode, uses _second_phase_step.
+        """
+        if self.training:
+            return self._first_phase_step(x)
+        else:
+            return self._second_phase_step(x)
+
     def _second_phase_step(self, x: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         x = self.embedding_module(x)
         emb = self.encoder(x)
@@ -267,6 +278,17 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
 
         return x_hat, y_hat_nested
 
+    def forward(self, x: torch.Tensor) -> Union[Tuple[torch.Tensor, ...], Tuple[Tuple[torch.Tensor, ...], torch.Tensor]]:
+        """
+        Main forward pass for Matryoshka model. Delegates to phase-specific methods.
+        - In training mode, uses _first_phase_step.
+        - In eval mode, uses _second_phase_step.
+        """
+        if self.training:
+            return self._first_phase_step(x)
+        else:
+            return self._second_phase_step(x)
+            
     def _second_phase_step(self, x: torch.Tensor) -> Union[Tuple[torch.Tensor, ...], Tuple[Tuple[torch.Tensor, ...], torch.Tensor]]:
         x = self.embedding_module(x)
         emb = self.encoder(x)
