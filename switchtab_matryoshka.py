@@ -97,6 +97,7 @@ class PaperExactSwitchTab(TS3LModule):
         self.output_dim = output_dim
         self.t = temperature
         self.__return_salient_feature = False
+        self.is_second_phase = False # Explicit phase control
         
         # Create projectors based on configuration
         self.projector_m = self._create_projector(
@@ -177,6 +178,24 @@ class PaperExactSwitchTab(TS3LModule):
     def return_salient_feature(self, flag: bool) -> None:
         self.__return_salient_feature = flag
 
+    def set_first_phase(self):
+        """Set the model to the first phase (pre-training)."""
+        self.is_second_phase = False
+
+    def set_second_phase(self, freeze_encoder: bool = False):
+        """Set the model to the second phase (fine-tuning)."""
+        self.is_second_phase = True
+        if freeze_encoder:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+            for param in self.embedding_module.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.encoder.parameters():
+                param.requires_grad = True
+            for param in self.embedding_module.parameters():
+                param.requires_grad = True
+
     def _first_phase_step(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         size = len(x) // 2
         x = self.embedding_module(x)
@@ -202,14 +221,12 @@ class PaperExactSwitchTab(TS3LModule):
 
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        Main forward pass. Delegates to phase-specific methods.
-        - In training mode, uses _first_phase_step.
-        - In eval mode, uses _second_phase_step.
+        Main forward pass. Delegates to phase-specific methods based on is_second_phase flag.
         """
-        if self.training:
-            return self._first_phase_step(x)
-        else:
+        if self.is_second_phase:
             return self._second_phase_step(x)
+        else:
+            return self._first_phase_step(x)
 
     def _second_phase_step(self, x: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         x = self.embedding_module(x)
@@ -280,14 +297,12 @@ class PaperExactSwitchTabMatryoshka(PaperExactSwitchTab):
 
     def forward(self, x: torch.Tensor) -> Union[Tuple[torch.Tensor, ...], Tuple[Tuple[torch.Tensor, ...], torch.Tensor]]:
         """
-        Main forward pass for Matryoshka model. Delegates to phase-specific methods.
-        - In training mode, uses _first_phase_step.
-        - In eval mode, uses _second_phase_step.
+        Main forward pass for Matryoshka model. Delegates to phase-specific methods based on is_second_phase flag.
         """
-        if self.training:
-            return self._first_phase_step(x)
-        else:
+        if self.is_second_phase:
             return self._second_phase_step(x)
+        else:
+            return self._first_phase_step(x)
             
     def _second_phase_step(self, x: torch.Tensor) -> Union[Tuple[torch.Tensor, ...], Tuple[Tuple[torch.Tensor, ...], torch.Tensor]]:
         x = self.embedding_module(x)

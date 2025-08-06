@@ -4,6 +4,7 @@ Simple training script for PaperExactSwitchTab and PaperExactSwitchTabMatryoshka
 """
 
 import argparse
+import os
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
@@ -65,6 +66,57 @@ class PaperExactSwitchTabLightning(TS3LLightining):
         self.log('lr', current_lr, prog_bar=True)
         print('')
 
+    def configure_optimizers(self):
+        """Configure optimizers with discriminative learning rates for the second phase."""
+        if self.model.is_second_phase:
+            # Fine-tuning phase: use different LRs and a plateau-based scheduler
+            encoder_params = list(self.model.embedding_module.parameters()) + list(self.model.encoder.parameters())
+            head_params = list(self.model.head.parameters())
+            
+            all_param_ids = {id(p) for p in self.model.parameters()}
+            grouped_param_ids = {id(p) for p in encoder_params} | {id(p) for p in head_params}
+            other_params = [p for p in self.model.parameters() if id(p) not in grouped_param_ids]
+
+            base_lr = self.optim_hparams.get('lr', 1e-3)
+            
+            optimizer_grouped_parameters = [
+                {'params': encoder_params, 'lr': base_lr / 100},
+                {'params': head_params, 'lr': base_lr},
+                {'params': other_params, 'lr': base_lr / 100}
+            ]
+            
+            optimizer = self.optim(optimizer_grouped_parameters)
+            
+            # Use a more stable scheduler for fine-tuning
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5, verbose=True)
+            
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "monitor": "val_loss",
+                }
+            }
+        else:
+            # First phase: use a single learning rate and the original scheduler
+            optimizer = self.optim(self.parameters(), **self.optim_hparams)
+
+            if self.sched is None:
+                return [optimizer]
+
+            scheduler = self.sched(optimizer, **self.scheduler_hparams)
+            
+            if scheduler.__class__.__name__ == 'OneCycleLR':
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {"scheduler": scheduler, "interval": "step", "frequency": 1}
+                }
+            else:
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1}
+                }
+
     def _get_first_phase_loss(self, batch):
         x_orig, x_corr, y = batch
         size = len(x_orig) // 2
@@ -113,7 +165,6 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         self.u_label = -1
         self.alpha = 1.0
         self.reconstruction_loss_fn = torch.nn.MSELoss()
-        self.matryoshka_loss_fn = create_matryoshka_loss()
         self.model = PaperExactSwitchTabMatryoshka(
             embedding_config=config.embedding_config,
             backbone_config=config.backbone_config,
@@ -133,90 +184,42 @@ class PaperExactSwitchTabMatryoshkaLightning(PaperExactSwitchTabLightning):
         x_combined = torch.cat([x_corr[:size], x_corr[size:]])
         x_hat, y_hat_nested = self.model._first_phase_step(x_combined)
         
-        # Debug: Check for NaN/inf in outputs
-        if torch.isnan(x_hat).any() or torch.isinf(x_hat).any():
-            print("Warning: NaN/Inf detected in reconstruction output")
-        
-        for i, y_hat in enumerate(y_hat_nested):
-            if torch.isnan(y_hat).any() or torch.isinf(y_hat).any():
-                print(f"Warning: NaN/Inf detected in nested output {i}")
-        
-        # Reconstruction loss
         recon_loss = self.reconstruction_loss_fn(x_hat, torch.cat([x_orig[:size], x_orig[size:], x_orig[:size], x_orig[size:]]))
         
-        # Matryoshka task loss
         labeled_mask = y != self.u_label
         if labeled_mask.any():
-            task_loss = self.matryoshka_loss_fn(y_hat_nested, y[labeled_mask])
+            filtered_y_hat_nested = [y_hat[labeled_mask] for y_hat in y_hat_nested]
+            y_labeled = y[labeled_mask]
             
-            # Debug: Check task loss components
-            if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:  # Log every 10 epochs, every 100 steps
-                with torch.no_grad():
-                    print(f"[Debug] Epoch {self.current_epoch}: recon_loss={recon_loss.item():.4f}, "
-                          f"task_loss={task_loss.item():.4f}, labeled_samples={labeled_mask.sum().item()}")
-                    # Check individual nested outputs
-                    for i, y_hat in enumerate(y_hat_nested):
-                        pred_mean = y_hat[labeled_mask].mean().item()
-                        pred_std = y_hat[labeled_mask].std().item()
-                        print(f"  Nested output {i}: mean={pred_mean:.4f}, std={pred_std:.4f}")
+            losses = [self.task_loss_fn(y_hat, y_labeled) for y_hat in filtered_y_hat_nested]
+            
+            if len(losses) > 1:
+                m_loss_main = losses[-1]
+                m_loss_aux = sum(losses[:-1]) / (len(losses) - 1)
+                task_loss = 0.5 * m_loss_main + 0.5 * m_loss_aux
+            else:
+                task_loss = losses[0]
         else:
-            task_loss = torch.tensor(0.0)
+            task_loss = torch.tensor(0.0, device=self.device)
             
-        total_loss = recon_loss + self.alpha * task_loss
-        
-        # Debug: Check final loss
-        if torch.isnan(total_loss).any() or torch.isinf(total_loss).any():
-            print("Warning: NaN/Inf detected in total loss")
-            
-        return total_loss
+        return recon_loss + self.alpha * task_loss
 
     def _get_second_phase_loss(self, batch):
         x, y = batch
         y_hat_nested = self.model._second_phase_step(x)
         
-        # Debug: Check for NaN/inf in nested outputs
-        for i, y_hat in enumerate(y_hat_nested):
-            if torch.isnan(y_hat).any() or torch.isinf(y_hat).any():
-                print(f"Warning: NaN/Inf detected in second phase nested output {i}")
+        losses = [self.task_loss_fn(y_hat, y) for y_hat in y_hat_nested]
         
-        task_loss = self.matryoshka_loss_fn(y_hat_nested, y)
-        
-        # Debug: Check task loss and predictions
-        if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:
-            with torch.no_grad():
-                print(f"[Debug Second Phase] Epoch {self.current_epoch}: task_loss={task_loss.item():.4f}")
-                for i, y_hat in enumerate(y_hat_nested):
-                    pred_mean = y_hat.mean().item()
-                    pred_std = y_hat.std().item()
-                    print(f"  Second phase nested output {i}: mean={pred_mean:.4f}, std={pred_std:.4f}")
-        
-        return task_loss, y, y_hat_nested[0]  # Use first nested output for metrics
+        if len(losses) > 1:
+            m_loss_main = losses[-1]
+            m_loss_aux = sum(losses[:-1]) / (len(losses) - 1)
+            task_loss = 0.5 * m_loss_main + 0.5 * m_loss_aux
+        else:
+            task_loss = losses[0]
+            
+        return task_loss, y, y_hat_nested[-1]
     
-    def on_before_optimizer_step(self, optimizer):
-        """Check gradients before optimizer step"""
-        if self.current_epoch % 10 == 0 and self.global_step % 100 == 0:
-            # Check gradients in MRL layer
-            mrl_layer = self.model.head
-            grad_norms = []
-            
-            for name, param in mrl_layer.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    grad_norms.append(grad_norm)
-                    if grad_norm == 0:
-                        print(f"Warning: Zero gradient in MRL layer parameter: {name}")
-                    elif torch.isnan(param.grad).any():
-                        print(f"Warning: NaN gradient in MRL layer parameter: {name}")
-                else:
-                    print(f"Warning: No gradient for MRL layer parameter: {name}")
-            
-            if grad_norms:
-                avg_grad_norm = sum(grad_norms) / len(grad_norms)
-                print(f"[Debug Gradients] Epoch {self.current_epoch}: MRL avg grad norm={avg_grad_norm:.6f}")
-            else:
-                print(f"[Debug Gradients] Epoch {self.current_epoch}: No gradients found in MRL layer")
-        
-        super().on_before_optimizer_step(optimizer)
+
 
 
 def train_model(model_class, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10):
@@ -250,45 +253,50 @@ def train_model(model_class, config, first_phase_datamodule, second_phase_datamo
     return pl_model
 
 
-def train_model_with_lr_finder(model_class, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10, use_lr_finder=True):
+def train_model_with_lr_finder(model_cls, model_args, model_name, config, first_phase_datamodule, second_phase_datamodule, max_epochs=10, use_lr_finder=True, args=None):
     """Train a model with LR finder and learning rate scheduling"""
-    pl_model = model_class(config)
     
-    # First phase training
-    pl_model.set_first_phase()
-    trainer = pl.Trainer(
-        accelerator='gpu',
-        devices=1,
-        max_epochs=max_epochs,
-        callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
-        enable_progress_bar=True,
-        enable_model_summary=True
-    )
+    checkpoint_path = f"{model_name}_phase1.ckpt"
     
-    # Optional LR finder for first phase
-    if use_lr_finder:
-        print("Running LR finder for first phase...")
-        tuner = Tuner(trainer)
-        # Temporarily add lr attribute for LR finder
-        pl_model.lr = pl_model.optim_hparams['lr']
-        lr_finder = tuner.lr_find(pl_model, datamodule=first_phase_datamodule, attr_name='lr')
-        suggested_lr = lr_finder.suggestion()
-        print(f"Suggested LR for first phase: {suggested_lr}")
+    if args.load_phase1_checkpoint and os.path.exists(checkpoint_path):
+        print(f"Loading model from checkpoint: {checkpoint_path}")
+        pl_model = model_cls.load_from_checkpoint(checkpoint_path, config=config, **model_args)
+    else:
+        pl_model = model_cls(config=config, **model_args)
         
-        # Update the learning rate in both places
-        pl_model.optim_hparams['lr'] = suggested_lr
-        pl_model.lr = suggested_lr
+        # First phase training
+        pl_model.set_first_phase()
+        trainer = pl.Trainer(
+            accelerator='gpu',
+            devices=1,
+            max_epochs=max_epochs,
+            callbacks=[EarlyStopping(monitor='val_loss', patience=max_epochs//2, mode='min')],
+            enable_progress_bar=True,
+            enable_model_summary=True,
+            gradient_clip_val=0.5
+        )
         
-        # Update OneCycleLR max_lr to use the suggested learning rate
-        if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
-            pl_model.scheduler_hparams['max_lr'] = suggested_lr
-            print(f"Updated OneCycleLR max_lr to: {suggested_lr}")
+        if use_lr_finder:
+            print("Running LR finder for first phase...")
+            tuner = Tuner(trainer)
+            pl_model.lr = pl_model.optim_hparams['lr']
+            lr_finder = tuner.lr_find(pl_model, datamodule=first_phase_datamodule, attr_name='lr')
+            suggested_lr = lr_finder.suggestion()
+            print(f"Suggested LR for first phase: {suggested_lr}")
+            
+            pl_model.optim_hparams['lr'] = suggested_lr
+            pl_model.lr = suggested_lr
+            
+            if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
+                pl_model.scheduler_hparams['max_lr'] = suggested_lr
+                print(f"Updated OneCycleLR max_lr to: {suggested_lr}")
+            
+            fig = lr_finder.plot(suggest=True)
+            fig.show()
         
-        # Plot the LR finder results
-        fig = lr_finder.plot(suggest=True)
-        fig.show()
-    
-    trainer.fit(pl_model, datamodule=first_phase_datamodule)
+        trainer.fit(pl_model, datamodule=first_phase_datamodule)
+        trainer.save_checkpoint(checkpoint_path)
+        print(f"Phase 1 model saved to {checkpoint_path}")
     
     # Second phase training  
     pl_model.set_second_phase(freeze_encoder=False)
@@ -301,28 +309,30 @@ def train_model_with_lr_finder(model_class, config, first_phase_datamodule, seco
         enable_model_summary=True
     )
     
-    # Optional LR finder for second phase
-    if use_lr_finder:
+    if use_lr_finder and not args.lr_phase2:
         print("Running LR finder for second phase...")
         tuner = Tuner(trainer)
-        # Temporarily add lr attribute for LR finder
         pl_model.lr = pl_model.optim_hparams['lr']
         lr_finder = tuner.lr_find(pl_model, datamodule=second_phase_datamodule, attr_name='lr')
         suggested_lr = lr_finder.suggestion()
         print(f"Suggested LR for second phase: {suggested_lr}")
         
-        # Update the learning rate in both places
         pl_model.optim_hparams['lr'] = suggested_lr
         pl_model.lr = suggested_lr
         
-        # Update OneCycleLR max_lr to use the suggested learning rate
         if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
             pl_model.scheduler_hparams['max_lr'] = suggested_lr
             print(f"Updated OneCycleLR max_lr to: {suggested_lr}")
         
-        # Plot the LR finder results
         fig = lr_finder.plot(suggest=True)
         fig.show()
+    elif args.lr_phase2:
+        print(f"Using specified learning rate for second phase: {args.lr_phase2}")
+        pl_model.optim_hparams['lr'] = args.lr_phase2
+        pl_model.lr = args.lr_phase2
+        if pl_model.scheduler_hparams and 'max_lr' in pl_model.scheduler_hparams:
+            pl_model.scheduler_hparams['max_lr'] = args.lr_phase2
+            print(f"Updated OneCycleLR max_lr to: {args.lr_phase2}")
     
     trainer.fit(pl_model, datamodule=second_phase_datamodule)
     
@@ -411,7 +421,7 @@ def compute_ks_metric(model, dataloader):
         return float('nan'), pos_probs, neg_probs
     
     # Check for constant predictions (no discrimination)
-    if np.allclose(pos_probs, neg_probs, rtol=1e-10) or np.var(all_probs) < 1e-10:
+    if np.var(all_probs) < 1e-10:
         print("Warning: Model shows no discrimination between classes (constant predictions)")
         return 0.0, pos_probs, neg_probs
     
@@ -440,6 +450,8 @@ def main(use_lr_finder=True):
     parser.add_argument('--projector_n_heads', type=int, default=8, help='Number of heads for transformer projector (default: 8)')
     parser.add_argument('--projector_dim_feedforward', type=int, default=2048, help='Feedforward dimension for transformer projector (default: 2048)')
     parser.add_argument('--projector_dropout', type=float, default=0.1, help='Dropout rate for transformer projector (default: 0.1)')
+    parser.add_argument('--lr_phase2', type=float, default=None, help='Override learning rate for the second phase (default: None, use LR finder)')
+    parser.add_argument('--load_phase1_checkpoint', action='store_true', help='Load model from phase 1 checkpoint and skip phase 1 training (default: False)')
     
     # Custom dataset arguments
     parser.add_argument('--train_path', type=str, default=None, help='Path to custom training CSV file (tab-separated). If provided, uses custom dataset instead of Higgs.')
@@ -485,6 +497,8 @@ def main(use_lr_finder=True):
         print("Loading Higgs dataset...")
         data, label, continuous_cols, category_cols, output_dim, metric_name, metric_hparams = load_higgs()
         
+        data = data.replace(-999.0, 0)
+
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(data, label, test_size=0.2, random_state=42)
         X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
@@ -518,7 +532,7 @@ def main(use_lr_finder=True):
         corruption_rate=args.corruption_rate,
         loss_fn="CrossEntropyLoss",
         metric=metric_name,
-        optim="RMSprop",
+        optim="AdamW",
         optim_hparams={'lr': 0.0003},  # Initial LR, will be updated by LR finder
         scheduler="OneCycleLR",  # OneCycleLR for better convergence
         scheduler_hparams={'max_lr': 0.0003, 'epochs': max_epochs, 'steps_per_epoch': steps_per_epoch, 'pct_start': 0.3, 'anneal_strategy': 'cos'}  # OneCycleLR params
@@ -571,16 +585,18 @@ def main(use_lr_finder=True):
     print("="*60)
     
     # Train paper-exact SwitchTab with LR finder
+    exact_model_args = {
+        'temperature': args.temperature,
+        'use_transformer_projector': args.use_transformer_projector,
+        'projector_n_heads': args.projector_n_heads,
+        'projector_dim_feedforward': args.projector_dim_feedforward,
+        'projector_dropout': args.projector_dropout
+    }
     exact_model = train_model_with_lr_finder(
-        lambda config: PaperExactSwitchTabLightning(
-            config, 
-            temperature=args.temperature,
-            use_transformer_projector=args.use_transformer_projector,
-            projector_n_heads=args.projector_n_heads,
-            projector_dim_feedforward=args.projector_dim_feedforward,
-            projector_dropout=args.projector_dropout
-        ), 
-        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
+        PaperExactSwitchTabLightning,
+        exact_model_args,
+        "PaperExactSwitchTab",
+        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder, args=args
     )
     
     print("\n" + "="*60) 
@@ -626,17 +642,19 @@ def main(use_lr_finder=True):
         if ratio < 1.2:  # Less than 20% increase
             print(f"Warning: Small progression between nesting dimensions {nesting_list[i-1]} -> {nesting_list[i]} "
                  f"(ratio: {ratio:.2f}). This may reduce Matryoshka effectiveness.")
+    matryoshka_model_args = {
+        'nesting_list': nesting_list,
+        'temperature': args.temperature,
+        'use_transformer_projector': args.use_transformer_projector,
+        'projector_n_heads': args.projector_n_heads,
+        'projector_dim_feedforward': args.projector_dim_feedforward,
+        'projector_dropout': args.projector_dropout
+    }
     matryoshka_model = train_model_with_lr_finder(
-        lambda config: PaperExactSwitchTabMatryoshkaLightning(
-            config, 
-            nesting_list=nesting_list,
-            temperature=args.temperature,
-            use_transformer_projector=args.use_transformer_projector,
-            projector_n_heads=args.projector_n_heads,
-            projector_dim_feedforward=args.projector_dim_feedforward,
-            projector_dropout=args.projector_dropout
-        ), 
-        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder
+        PaperExactSwitchTabMatryoshkaLightning,
+        matryoshka_model_args,
+        "PaperExactSwitchTabMatryoshka",
+        config, first_phase_dl, second_phase_dl, max_epochs=max_epochs, use_lr_finder=use_lr_finder, args=args
     )
     
     print("\n" + "="*60)
