@@ -6,3 +6,6 @@ pytorch_lightning
 torchmetrics
 ucimlrepo
 matplotlib
+s3fs
+boto3
+optuna
